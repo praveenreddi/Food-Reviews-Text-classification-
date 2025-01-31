@@ -1,34 +1,55 @@
+def create_qa_chain():
+    # Increase the number of relevant chunks retrieved
+    retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={
+            "k": 10,  # Increase this number to get more relevant chunks
+            "fetch_k": 20  # Fetch more documents before selecting top k
+        }
+    )
+
+    chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",  # Use 'stuff' to include all retrieved documents
+        retriever=retriever,
+        return_source_documents=True
+    )
+    return chain
+
+# Modified prompt for better coverage
 def analyze_detailed_issues(result_dict):
     prompt = """
-    Analyze all feedback chunks and provide a comprehensive summary in exactly this format:
+    Analyze ALL the provided feedback thoroughly and create a comprehensive summary.
+    You MUST check and include issues for ALL of these categories if they exist:
+
+    1. Web Acct Mgmt (including):
+       - Registration & Login
+       - Profile
+       - ViewBill & Payment
+       - TOBR
+       - View Usage
+
+    2. Web Sales
+
+    3. Support & Chat (including):
+       - Online Support
+       - Device Unlock
+       - Outage Portal
+
+    Format the output exactly like this:
 
     Web Acct Mgmt - Below are the themes observed for Web Acct Mgmt journey this week are -
 
-    • Registration & Login - [List specific issues with exact error messages] (group related QM links in parentheses, separated by commas)
+    • Registration & Login - [List ALL specific issues with exact error messages] (include ALL related QM links)
 
-    • Profile - [List specific issues with exact error messages] (group related QM links in parentheses)
+    [Continue with other categories...]
 
-    • ViewBill & Payment - [List specific issues with exact error messages] (group related QM links in parentheses)
-
-    • TOBR - [List specific issues with exact error messages] (group related QM links in parentheses)
-
-    • View Usage - [List specific issues with exact error messages] (group related QM links in parentheses)
-
-    Web Sales - [List specific issues with exact error messages and their QM links]
-
-    Support & Chat - Support & Chat journey weekly avg rating [include rating details if available]. Some common feedback observed in customer feedback on support & chat are as below:
-    • Online Support - [List specific feedback points separated by commas]
-    • Device Unlock - [List specific issues with QM links]
-    • Outage Portal - [List specific feedback]
-
-    Important formatting rules:
-    1. Maintain exact category headers (Web Acct Mgmt, Web Sales, Support & Chat)
-    2. Include detailed error messages in quotes exactly as reported
-    3. Group related QM links within parentheses
-    4. Use bullet points (•) for subcategories
-    5. Separate multiple issues within a category with commas
-    6. Include all relevant QM links for each issue
-    7. Maintain the exact hierarchical structure
+    Important rules:
+    1. DO NOT skip any category that has issues
+    2. Include ALL QM links for each issue
+    3. Check thoroughly for issues in each category
+    4. Use exact error messages in quotes
+    5. If a category truly has no issues, only then mark it as "No issues reported"
 
     Results to analyze:
     {text}
@@ -36,28 +57,35 @@ def analyze_detailed_issues(result_dict):
 
     try:
         result_text = result_dict.get('result', '')
+        # Ensure we're getting all the content
+        if isinstance(result_text, list):
+            result_text = ' '.join(result_text)
+
         formatting_prompt = prompt.format(text=result_text)
 
-        formatted_result = llm(formatting_prompt)
+        # Increase max tokens if needed
+        formatted_result = llm(formatting_prompt, max_tokens=4000)
 
         print(formatted_result)
-
         return formatted_result
 
     except Exception as e:
         print(f"Error in formatting: {e}")
         return None
 
-# Usage
+# Usage with modified query
 try:
     query = """
-    Analyze all feedback chunks and provide a comprehensive summary of:
-    1. Web Account Management issues and their QM links
-    2. Web Sales issues and their QM links
-    3. Support & Chat feedback
-    Group similar issues together and include all relevant QM links.
+    Provide a comprehensive analysis of ALL customer feedback and issues across ALL categories:
+    - Web Account Management (including all subcategories)
+    - Web Sales
+    - Support & Chat
+
+    Include ALL relevant issues and their corresponding QM links.
+    Do not skip any category that has reported issues.
     """
 
+    # Increase the number of relevant chunks
     result = chain({"query": query})
     analysis = analyze_detailed_issues(result)
 
