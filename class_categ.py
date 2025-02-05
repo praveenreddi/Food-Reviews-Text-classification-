@@ -1,6 +1,32 @@
-def chunk_analysis(df, max_chunk_size=8000):
+def chunk_data(df, chunk_size=5000):
+    # Group by Category first
+    grouped = df.groupby('Category')
+    chunks_by_category = {}
+
+    for category, group in grouped:
+        current_chunk = ""
+        category_chunks = []
+
+        for _, row in group.iterrows():
+            if pd.notna(row['Comments']) and pd.notna(row['att18_@MReplayLink']):
+                entry = f"Issue: {str(row['Comments'])}\n"
+                entry += f"Link: {str(row['att18_@MReplayLink'])}\n\n"
+
+                if len(current_chunk) + len(entry) > chunk_size:
+                    category_chunks.append(current_chunk)
+                    current_chunk = entry
+                else:
+                    current_chunk += entry
+
+        if current_chunk:
+            category_chunks.append(current_chunk)
+
+        chunks_by_category[category] = category_chunks
+
+    return chunks_by_category
+
+def analyze_feedback_by_category(df):
     try:
-        # Initialize LLM
         llm = LlamaLLM(llm_model="llama")
         print("llama", llm.llm_model)
 
@@ -8,122 +34,78 @@ def chunk_analysis(df, max_chunk_size=8000):
         df_filtered = df[df['Category'] != 'Unknown'].copy()
         print(f"Records after filtering: {len(df_filtered)}")
 
-        # Group by category
-        grouped = df_filtered.groupby('Category')
+        # Get chunks by category
+        chunks_by_category = chunk_data(df_filtered)
 
-        # Initialize results storage
-        all_results = []
-
-        # Base prompt template
-        base_prompt = """Analyze these customer feedback comments and provide a summary for the following category:
-
-{category}
-
-For each issue, include the QM link in parentheses.
-Format each issue as: [Description of issue] (QM Link)
+        # Analysis template for each category
+        category_prompt = """Analyze these customer feedback comments for the {category} category.
+Group similar issues together and include all relevant QM links in parentheses.
+Format the output exactly like this example:
+{category} - [Main issue description] (QM_Link1, QM_Link2)
 
 Feedback to analyze:
-{feedback}
-"""
+{feedback}"""
 
-        # Process each category separately
-        for category, group in grouped:
-            print(f"Processing category: {category}")
+        category_results = {}
 
-            # Prepare category data
-            category_input = ""
-            current_chunk = ""
-            chunk_count = 1
+        # Process each category
+        for category, chunks in chunks_by_category.items():
+            category_analysis = []
 
-            for _, row in group.iterrows():
-                if pd.notna(row['Comments']) and pd.notna(row['att18_@MReplayLink']):
-                    issue_text = f"Issue: {str(row['Comments'])}\nLink: {str(row['att18_@MReplayLink'])}\n\n"
-
-                    # If adding this issue would exceed chunk size, process current chunk
-                    if len(current_chunk) + len(issue_text) > max_chunk_size:
-                        # Process current chunk
-                        prompt = base_prompt.format(
-                            category=category,
-                            feedback=current_chunk
-                        )
-
-                        try:
-                            print(f"Processing chunk {chunk_count} for {category}")
-                            result = llm(prompt)
-                            if result:
-                                all_results.append(result)
-                        except Exception as e:
-                            print(f"Error processing chunk {chunk_count} for {category}: {e}")
-
-                        # Reset chunk
-                        current_chunk = issue_text
-                        chunk_count += 1
-                    else:
-                        current_chunk += issue_text
-
-            # Process final chunk if any
-            if current_chunk:
-                prompt = base_prompt.format(
-                    category=category,
-                    feedback=current_chunk
-                )
-
+            for chunk in chunks:
                 try:
-                    print(f"Processing final chunk for {category}")
-                    result = llm(prompt)
+                    prompt = category_prompt.format(
+                        category=category,
+                        feedback=chunk
+                    )
+
+                    result = llm._call(prompt)
                     if result:
-                        all_results.append(result)
+                        category_analysis.append(result)
                 except Exception as e:
-                    print(f"Error processing final chunk for {category}: {e}")
+                    print(f"Error processing chunk for {category}: {e}")
 
-        # Combine all results
-        if all_results:
-            # Final summary prompt
-            final_prompt = """Combine and summarize these analysis results into a final report using this exact format:
+            if category_analysis:
+                category_results[category] = " ".join(category_analysis)
 
-Web Acct Mgmt - Below are the themes observed for Web Acct Mgmt journey this week:
+        # Final summary prompt
+        final_prompt = """Combine these analysis results into a final report using exactly this format:
 
-Registration & Login
-- [List main issues with QM links]
+Web Acct Mgmt - Below are the themes observed for Web Acct Mgmt journey this week are -
+Registration & Login - [Group similar issues with their QM links in parentheses]
+Profile - [Group similar issues with their QM links in parentheses]
+ViewBill & Payment - [Group similar issues with their QM links in parentheses]
+TOBR - [Group similar issues with their QM links in parentheses]
+View Usage - [Group similar issues with their QM links in parentheses]
+Web Sales - [Group similar issues with their QM links in parentheses]
+Upper Funnel - [Group similar issues with their QM links in parentheses]
 
-Profile
-- [List main issues with QM links]
+Support & Chat - Support & Chat journey weekly avg rating has improved this week and above the last month avg rating. Some common feedback observed in customer feedback on support & chat are as below.
+• Online Support - [List main issues about wait times, chat, service quality]
+• Device Unlock - [Group similar issues with their QM links in parentheses]
+• Outage Portal - [Group similar issues with their QM links in parentheses]
 
-ViewBill & Payment
-- [List main issues with QM links]
+Rules:
+1. Group similar issues together
+2. Include all QM links in parentheses after each issue
+3. Separate multiple QM links with commas
+4. Keep exact format as shown above
 
-TOBR
-- [List main issues with QM links]
+Category analyses to combine:
+{analyses}"""
 
-View Usage
-- [List main issues with QM links]
+        # Combine all category results
+        analyses_text = "\n\n".join([f"{cat}:\n{result}" for cat, result in category_results.items()])
 
-Web Sales
-- [List main issues with QM links]
-
-Upper Funnel
-- [List main issues with QM links]
-
-Support & Chat
-• Online Support
-- [List issues about wait times, chat, service quality]
-• Device Unlock
-- [List main issues with QM links]
-• Outage Portal
-- [List main issues with QM links]
-
-Analysis results to combine:
-{results}
-"""
-
-            try:
-                final_result = llm(final_prompt.format(results="\n\n".join(all_results)))
+        try:
+            final_result = llm._call(final_prompt.format(analyses=analyses_text))
+            if final_result:
                 return final_result
-            except Exception as e:
-                print(f"Error in final summary: {e}")
-                return "\n\n".join(all_results)
-        else:
-            return "No results generated from analysis"
+            else:
+                return "Error: Final analysis returned None"
+        except Exception as e:
+            print(f"Error in final analysis: {e}")
+            return f"Error in final analysis: {str(e)}"
 
     except Exception as e:
         print(f"Error in analysis: {str(e)}")
@@ -134,7 +116,7 @@ Analysis results to combine:
 # Main execution
 try:
     print("Starting analysis...")
-    analysis = chunk_analysis(df_summ)
+    analysis = analyze_feedback_by_category(df_summ)
 
     if analysis:
         if isinstance(analysis, str) and analysis.startswith("Error"):
