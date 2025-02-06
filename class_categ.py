@@ -1,27 +1,30 @@
-system_message = """Analyze the sentiment and emotion in the following comment.
-    Classify the emotion into one of these specific categories:
-    Happy, Sad, Angry, Frustration, Sarcastic, Neutral, Surprised, Fear, Unhappy, or Unknown.
+import pandas as pd
 
-    Respond with a JSON object containing:
-    {
-        "emotion_summary": one of the specified emotions listed above,
-        "emotion_confidence": confidence score between 0 and 1
-    }
+# Read both Excel files
+# Replace 'first_file.xlsx' and 'main_file.xlsx' with your actual file names
+df_mots = pd.read_excel('first_file.xlsx')
+df_main = pd.read_excel('main_file.xlsx')
 
-    Guidelines for classification:
-    - Happy: expressions of joy, satisfaction, excitement, positive feelings
-    - Sad: expressions of sadness, disappointment
-    - Angry: expressions of anger, rage
-    - Frustration: expressions of frustration, annoyance
-    - Sarcastic: expressions of sarcasm, irony
-    - Neutral: no clear emotion, objective statements
-    - Surprised: expressions of surprise, shock, amazement
-    - Fear: expressions of fear, worry, anxiety
-    - Unhappy: expressions of general unhappiness, discontent
-    - Unknown: use when the emotion is unclear, ambiguous, or cannot be determined with confidence
+# Filter rows where active is True
+df_mots_filtered = df_mots[df_mots['active'] == True]
 
-    Important:
-    - Always respond with exactly one of these 10 emotions: Happy, Sad, Angry, Frustration, Sarcastic, Neutral, Surprised, Fear, Unhappy, or Unknown
-    - Use 'Unknown' when you're not confident about the emotion or when the text is unclear
-    - If confidence is below 0.4, default to 'Unknown'
-    - Do not use any other emotion categories"""
+# Get the list of applications to search for
+applications_to_search = df_mots_filtered['mots_acronym'].tolist()
+
+# Create a mask for matching in either casuer_acronym or primary_application columns
+mask = (df_main['casuer_acronym'].isin(applications_to_search)) | \
+       (df_main['primary_application'].isin(applications_to_search))
+
+# Filter the main dataframe based on the mask
+result_df = df_main[mask]
+
+# Save the result to a new Excel file
+result_df.to_excel('matched_applications.xlsx', index=False)
+
+# Print some information about the results
+print(f"Total applications to search: {len(applications_to_search)}")
+print(f"Total matches found: {len(result_df)}")
+
+# Created/Modified files during execution:
+print("Created/Modified files:")
+print("matched_applications.xlsx")
