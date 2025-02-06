@@ -1,138 +1,125 @@
-def chunk_data(df, chunk_size=5000):
-    # Group by Category first
-    grouped = df.groupby('Category')
-    chunks_by_category = {}
+import pandas as pd
+import json
+import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
-    for category, group in grouped:
-        current_chunk = ""
-        category_chunks = []
+# Configuration - UPDATE THESE VALUES
+SAS_TOKEN = "your_base64_encoded_sas_token_here"
+TARGET_COLUMNS = ["NAVIGATION_OE", "FEEDBACK", "OTHER_COLUMN"]  # Add your columns
+CSV_PATH = "abfss://opsdashboards@blackbirdproddatastore.dfs.core.windows.net/VOC/pitch26/CSAT/your_file.csv"
+MAX_ROWS = 500  # Set to None for full dataset
 
-        for _, row in group.iterrows():
-            if pd.notna(row['Comments']) and pd.notna(row['att18_@MReplayLink']):
-                entry = f"Issue: {str(row['Comments'])}\n"
-                entry += f"Link: {str(row['att18_@MReplayLink'])}\n\n"
+def get_system_message_modified():
+    return """Analyze user comments delimited by ###|#. Return EXACTLY this JSON:
+{
+  "emotion_summary": "happy/sad/surprised/anger/fear/disgust/sarcastic/neutral",
+  "emotion_rationale": "brief explanation",
+  "emotion_confidence": 0.99
+}"""
 
-                if len(current_chunk) + len(entry) > chunk_size:
-                    category_chunks.append(current_chunk)
-                    current_chunk = entry
-                else:
-                    current_chunk += entry
+def classify_comment_rationale(user_comment):
+    system_message = get_system_message_modified()
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": f"###|#{user_comment}#|###"}
+    ]
 
-        if current_chunk:
-            category_chunks.append(current_chunk)
-
-        chunks_by_category[category] = category_chunks
-
-    return chunks_by_category
-
-def analyze_feedback_by_category(df):
     try:
-        llm = LlamaLLM(llm_model="llama")
-        print("llama", llm.llm_model)
+        # Replace with your actual LLM API call
+        completion = llm._call(messages)  # Mock implementation
 
-        # Filter data
-        df_filtered = df[df['Category'] != 'Unknown'].copy()
-        print(f"Records after filtering: {len(df_filtered)}")
+        # Extract response text
+        if hasattr(completion, 'choices') and completion.choices:
+            response_text = completion.choices[0].message.content.strip()
+        else:
+            return ("neutral", "API Error", 0.5)
 
-        # Get chunks by category
-        chunks_by_category = chunk_data(df_filtered)
+        # Clean JSON response
+        response_text = response_text.replace("'", '"').split('{', 1)[-1].rsplit('}', 1)[0]
+        response_json = json.loads("{" + response_text + "}")
 
-        # Analysis template for each category
-        category_prompt = """Analyze these customer feedback comments for the {category} category.
-Group similar issues together and include all relevant QM links in parentheses.
-Format the output exactly like this example:
-{category} - [Main issue description] (QM_Link1, QM_Link2)
-
-Feedback to analyze:
-{feedback}"""
-
-        category_results = {}
-
-        # Process each category
-        for category, chunks in chunks_by_category.items():
-            category_analysis = []
-
-            for chunk in chunks:
-                try:
-                    prompt = category_prompt.format(
-                        category=category,
-                        feedback=chunk
-                    )
-
-                    result = llm._call(prompt)
-                    if result:
-                        category_analysis.append(result)
-                except Exception as e:
-                    print(f"Error processing chunk for {category}: {e}")
-
-            if category_analysis:
-                category_results[category] = " ".join(category_analysis)
-
-        # Final summary prompt
-        final_prompt = """Combine these analysis results into a final report using exactly this format:
-
-Web Acct Mgmt - Below are the themes observed for Web Acct Mgmt journey this week are -
-Registration & Login - [Group similar issues with their QM links in parentheses]
-Profile - [Group similar issues with their QM links in parentheses]
-ViewBill & Payment - [Group similar issues with their QM links in parentheses]
-TOBR - [Group similar issues with their QM links in parentheses]
-View Usage - [Group similar issues with their QM links in parentheses]
-Web Sales - [Group similar issues with their QM links in parentheses]
-Upper Funnel - [Group similar issues with their QM links in parentheses]
-
-Support & Chat - Support & Chat journey weekly avg rating has improved this week and above the last month avg rating. Some common feedback observed in customer feedback on support & chat are as below.
-• Online Support - [List main issues about wait times, chat, service quality]
-• Device Unlock - [Group similar issues with their QM links in parentheses]
-• Outage Portal - [Group similar issues with their QM links in parentheses]
-
-Rules:
-1. Group similar issues together
-2. Include all QM links in parentheses after each issue
-3. Separate multiple QM links with commas
-4. Keep exact format as shown above
-
-Category analyses to combine:
-{analyses}"""
-
-        # Combine all category results
-        analyses_text = "\n\n".join([f"{cat}:\n{result}" for cat, result in category_results.items()])
-
-        try:
-            final_result = llm._call(final_prompt.format(analyses=analyses_text))
-            if final_result:
-                return final_result
-            else:
-                return "Error: Final analysis returned None"
-        except Exception as e:
-            print(f"Error in final analysis: {e}")
-            return f"Error in final analysis: {str(e)}"
+        return (
+            response_json.get("emotion_summary", "neutral").lower(),
+            response_json.get("emotion_rationale", "No rationale"),
+            min(1.0, max(0.0, float(response_json.get("emotion_confidence", 0.5))))
+        )
 
     except Exception as e:
-        print(f"Error in analysis: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return f"Error in analysis: {str(e)}"
+        print(f"Classification error: {str(e)}")
+        return ("neutral", "Processing Error", 0.5)
 
-# Main execution
-try:
-    print("Starting analysis...")
-    analysis = analyze_feedback_by_category(df_summ)
+def process_chunk(chunk_df):
+    chunk_results = {}
+    for idx, row in chunk_df.iterrows():
+        row_result = {}
+        for col in TARGET_COLUMNS:
+            text = str(row[col]) if pd.notna(row[col]) else ""
+            if text.strip():
+                result = classify_comment_rationale(text)
+                row_result.update({
+                    f"emotion_summary_{col}": result[0],
+                    f"emotion_confidence_{col}": result[2]
+                })
+            else:
+                row_result.update({
+                    f"emotion_summary_{col}": None,
+                    f"emotion_confidence_{col}": None
+                })
+        chunk_results[idx] = row_result
+    return chunk_results
 
-    if analysis:
-        if isinstance(analysis, str) and analysis.startswith("Error"):
-            print(f"\nAnalysis failed: {analysis}")
-        else:
-            print("\nAnalysis Results:")
-            print(analysis)
+def main():
+    # Initialize result columns
+    result_columns = []
+    for col in TARGET_COLUMNS:
+        result_columns.extend([f"emotion_summary_{col}", f"emotion_confidence_{col}"])
 
-            # Save results
-            with open('feedback_analysis.txt', 'w', encoding='utf-8') as f:
-                f.write(analysis)
-            print("Results saved to feedback_analysis.txt")
-    else:
-        print("\nNo analysis results generated")
+    # Read data
+    decoded_sas_token = base64.b64decode(SAS_TOKEN).decode()
+    combined_data = pd.read_csv(
+        CSV_PATH,
+        storage_options={"sas_token": decoded_sas_token},
+        nrows=MAX_ROWS
+    )
 
-except Exception as e:
-    print(f"Error in main execution: {str(e)}")
-    import traceback
-    traceback.print_exc()
+    # Initialize columns
+    for col in result_columns:
+        combined_data[col] = None
+
+    # Process data
+    valid_mask = combined_data[TARGET_COLUMNS].notna().any(axis=1)
+    valid_data = combined_data.loc[valid_mask, TARGET_COLUMNS]
+
+    def split_chunks(data, chunk_size=50):
+        indices = data.index.tolist()
+        return [indices[i:i+chunk_size] for i in range(0, len(indices), chunk_size)]
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {}
+        for chunk_indices in split_chunks(valid_data):
+            chunk_df = valid_data.loc[chunk_indices]
+            future = executor.submit(process_chunk, chunk_df)
+            futures[future] = chunk_indices
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
+            chunk_indices = futures[future]
+            try:
+                results.update(future.result())
+            except Exception as e:
+                print(f"Chunk error: {str(e)}")
+
+    # Update final dataframe
+    for idx, res in results.items():
+        for col in TARGET_COLUMNS:
+            combined_data.at[idx, f"emotion_summary_{col}"] = res.get(f"emotion_summary_{col}")
+            combined_data.at[idx, f"emotion_confidence_{col}"] = res.get(f"emotion_confidence_{col}")
+
+    # Save results
+    output_path = CSV_PATH.replace(".csv", "_PROCESSED.csv")
+    combined_data.to_csv(output_path, index=False, storage_options={"sas_token": decoded_sas_token})
+    print(f"Processing complete. Results saved to: {output_path}")
+
+if __name__ == "__main__":
+    main()
