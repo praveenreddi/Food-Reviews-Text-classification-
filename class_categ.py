@@ -9,39 +9,44 @@ def classify_comment_rationale(user_comment):
         elif hasattr(completion, "choices") and completion.choices:
             response_text = completion.choices[0].message.content.strip()
         if not response_text:
-            return ("neutral", "Error parsing", 0.5)
+            return ("neutral", 0.5)
 
         try:
             response_json = json.loads(response_text)
         except json.JSONDecodeError as je:
             print(f"JSON decode error: {je}")
-            return ("neutral", "Error parsing", 0.5)
+            return ("neutral", 0.5)
         return (
             response_json.get("emotion_summary", "neutral"),
-            response_json.get("emotion_rationale", "No Rationale"),
             float(response_json.get("emotion_confidence", 0.5))
         )
     except Exception as e:
         print(f"Error in classification: {str(e)}")
-        return ("neutral", "Error parsing", 0.5)
+        return ("neutral", 0.5)
 
 def process_chunk(chunk_df):
     chunk_results = {}
-    for column in chunk_df.columns:  # Process each column in the chunk
+    for column in chunk_df.columns:
         chunk_results[column] = {}
         for idx, text in chunk_df[column].items():
             if pd.isna(text) or not isinstance(text, str) or not text.strip():
-                chunk_results[column][idx] = (None, None, None)
+                chunk_results[column][idx] = (None, None)
             else:
                 chunk_results[column][idx] = classify_comment_rationale(str(text))
     return chunk_results
 
-# Main processing code
+# Main code
+import pandas as pd
+import json
+import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+
 csv_path = "abfss://opsdashboards@blackbirdproddatastore.dfs.core.windows.net/VOC/pitch26/CSAT/..."
 decoded_sas_token = base64.b64decode(sas_token).decode()
 
 # Define all columns to process
-columns_to_process = ["NAVIGATION_OE", "SPEED_OE", "RELIABILITY_OE"]  # Add all your columns here
+columns_to_process = ["NAVIGATION_OE", "SPEED_OE", "RELIABILITY_OE"]
 
 combined_data = pd.read_csv(csv_path, storage_options={"sas_token": decoded_sas_token})
 
@@ -56,7 +61,7 @@ for column in columns_to_process:
     for result_col in result_columns[column]:
         combined_data[result_col] = None
 
-# Process valid data for all columns
+# Process valid data
 valid_masks = {col: combined_data[col].notna() for col in columns_to_process}
 valid_data = combined_data[columns_to_process].loc[valid_masks[columns_to_process[0]]]
 print(len(combined_data))
@@ -97,7 +102,7 @@ with ThreadPoolExecutor(max_workers=8) as executor:
 for col in columns_to_process:
     for idx, result_tuple in results_dict[col].items():
         if result_tuple:
-            combined_data.loc[idx, result_columns[col]] = result_tuple[:2]  # Taking summary and confidence
+            combined_data.loc[idx, result_columns[col]] = result_tuple  # Taking summary and confidence
 
 print("Processing completed")
 print(f"Total rows processed: {len(results_dict[columns_to_process[0]])}")
