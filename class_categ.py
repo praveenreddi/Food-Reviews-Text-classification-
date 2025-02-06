@@ -18,13 +18,23 @@ mask = (df_main['casuer_acronym'].isin(applications_to_search)) | \
 # Filter the main dataframe based on the mask
 result_df = df_main[mask]
 
+# Keep only the required columns
+result_df = result_df[['ticket_inc', 'month', 'causer_acronym', 'incident_start_time_cst']]
+
+# Remove duplicates based on ticket_inc column
+result_df = result_df.drop_duplicates(subset=['ticket_inc'])
+
+# Sort by incident_start_time_cst from past to recent
+result_df = result_df.sort_values(by='incident_start_time_cst', ascending=True)
+
 # Save the result to a new Excel file
-result_df.to_excel('matched_applications.xlsx', index=False)
+result_df.to_excel('matched_applications_filtered.xlsx', index=False)
 
 # Print some information about the results
-print(f"Total applications to search: {len(applications_to_search)}")
-print(f"Total matches found: {len(result_df)}")
+print(f"Total unique tickets found: {len(result_df)}")
+print("\nFirst few rows of the sorted data:")
+print(result_df.head())
 
 # Created/Modified files during execution:
-print("Created/Modified files:")
-print("matched_applications.xlsx")
+print("\nCreated/Modified files:")
+print("matched_applications_filtered.xlsx")
