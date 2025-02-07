@@ -1,46 +1,21 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score, classification_report
-import xgboost as xgb
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-import seaborn as sns
+from scipy import stats
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+import xgboost as xgb
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from scipy.stats import weibull_min, gamma, poisson
+import warnings
+warnings.filterwarnings('ignore')
 
-### 1. Data Preparation and Automatic Risk Calculation
-def calculate_month_risks(df):
+# Step 1: Data Loading and Preprocessing
+def load_and_preprocess_data(df):
     """
-    Automatically calculate risk scores for each month based on historical patterns
-    """
-    # Convert to datetime if not already
-    df['incident_start_time_cst'] = pd.to_datetime(df['incident_start_time_cst'])
-
-    # Extract month
-    df['month'] = df['incident_start_time_cst'].dt.month
-
-    # Calculate monthly frequencies
-    monthly_counts = df['month'].value_counts()
-
-    # Calculate risk scores (normalized between 0 and 1)
-    max_count = monthly_counts.max()
-    month_risks = (monthly_counts / max_count).to_dict()
-
-    # Fill missing months with minimum risk
-    min_risk = min(month_risks.values()) if month_risks else 0
-    for month in range(1, 13):
-        if month not in month_risks:
-            month_risks[month] = min_risk
-
-    print("\nAutomatically Calculated Month Risks:")
-    for month in sorted(month_risks.keys()):
-        print(f"Month {month}: {month_risks[month]:.3f}")
-
-    return month_risks
-
-def prepare_data(df):
-    """
-    Prepare and engineer features from raw data
+    Load and preprocess the data with feature engineering
     """
     # Convert to datetime
     df['incident_start_time_cst'] = pd.to_datetime(df['incident_start_time_cst'])
@@ -52,171 +27,188 @@ def prepare_data(df):
     df['hour'] = df['incident_start_time_cst'].dt.hour
     df['day_of_week'] = df['incident_start_time_cst'].dt.dayofweek
 
-    # Calculate month risks
-    month_risks = calculate_month_risks(df)
-    df['month_risk'] = df['month'].map(month_risks)
-
-    # Create rolling features
+    # Remove duplicates within same month/year for each application
     df = df.sort_values('incident_start_time_cst')
-    df['days_since_last_outage'] = df['incident_start_time_cst'].diff().dt.days
-
-    # Calculate rolling outage counts
-    df['outages_last_90days'] = df['incident_start_time_cst'].rolling('90D').count()
-    df['outages_last_180days'] = df['incident_start_time_cst'].rolling('180D').count()
-
-    # Business hours and seasonal features
-    df['is_business_hours'] = ((df['hour'] >= 7) & (df['hour'] <= 15)).astype(int)
-    df['is_quarter_end'] = df['month'].isin([3, 6, 9, 12]).astype(int)
+    df = df.drop_duplicates(subset=['causer_acronym', 'year', 'month'], keep='first')
 
     return df
 
-### 2. Visualization of Patterns
-def visualize_patterns(df):
+# Step 2: Feature Engineering
+def create_features(df):
     """
-    Create visualizations of outage patterns
+    Create additional features for better prediction
     """
-    plt.figure(figsize=(15, 10))
+    # Create time-based features
+    features = pd.DataFrame()
+    features['month'] = df['month']
+    features['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
+    features['is_night'] = ((df['hour'] >= 22) | (df['hour'] <= 5)).astype(int)
 
-    # Monthly distribution
-    plt.subplot(2, 2, 1)
-    monthly_counts = df['month'].value_counts().sort_index()
-    sns.barplot(x=monthly_counts.index, y=monthly_counts.values)
-    plt.title('Outages by Month')
-    plt.xlabel('Month')
-    plt.ylabel('Number of Outages')
+    # Create seasonal indicators
+    features['is_spring'] = df['month'].isin([3, 4, 5]).astype(int)
+    features['is_summer'] = df['month'].isin([6, 7, 8]).astype(int)
+    features['is_fall'] = df['month'].isin([9, 10, 11]).astype(int)
+    features['is_winter'] = df['month'].isin([12, 1, 2]).astype(int)
 
-    # Yearly trend
-    plt.subplot(2, 2, 2)
-    yearly_counts = df['year'].value_counts().sort_index()
-    sns.lineplot(x=yearly_counts.index, y=yearly_counts.values)
-    plt.title('Yearly Trend of Outages')
-    plt.xlabel('Year')
-    plt.ylabel('Number of Outages')
+    # Calculate historical incident rates
+    monthly_rates = df.groupby('month').size() / len(df['year'].unique())
+    features['historical_rate'] = features['month'].map(monthly_rates)
 
-    # Hour of day distribution
-    plt.subplot(2, 2, 3)
-    sns.histplot(df['hour'], bins=24)
-    plt.title('Outages by Hour of Day')
-    plt.xlabel('Hour')
-    plt.ylabel('Count')
+    return features
 
-    # Month risk scores
-    plt.subplot(2, 2, 4)
-    sns.scatterplot(x=df['month'], y=df['month_risk'])
-    plt.title('Calculated Month Risk Scores')
-    plt.xlabel('Month')
-    plt.ylabel('Risk Score')
-
-    plt.tight_layout()
-    plt.show()
-
-### 3. Model Training
-def train_model(df):
-    """
-    Train XGBoost model with automatically engineered features
-    """
-    # Prepare features
-    feature_cols = ['month', 'day', 'hour', 'day_of_week', 'month_risk',
-                   'is_business_hours', 'is_quarter_end',
-                   'outages_last_90days', 'outages_last_180days']
-
-    X = df[feature_cols]
-    y = np.ones(len(df))  # Since all rows represent outages
-
-    # Train-test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False
-    )
-
-    # Train model
-    model = xgb.XGBClassifier(
+# Step 3: Model Definitions
+def xgboost_predict(X_train, y_train, X_pred):
+    """XGBoost prediction"""
+    model = xgb.XGBRegressor(
         n_estimators=100,
         learning_rate=0.1,
-        max_depth=4,
-        random_state=42
+        max_depth=3,
+        objective='reg:squarederror'
     )
-
     model.fit(X_train, y_train)
+    return np.clip(model.predict(X_pred), 0, 1)
 
-    # Feature importance
-    feature_importance = pd.DataFrame({
-        'feature': feature_cols,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
+def random_forest_predict(X_train, y_train, X_pred):
+    """Random Forest prediction"""
+    rf = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf.fit(X_train, y_train)
+    return np.clip(rf.predict(X_pred), 0, 1)
 
-    print("\nFeature Importance:")
-    print(feature_importance)
+def survival_analysis_predict(data):
+    """Weibull Survival Analysis"""
+    intervals = np.diff(data['incident_start_time_cst'].values)
+    intervals = np.array([x.total_seconds() / (24*3600) for x in intervals])
+    params = weibull_min.fit(intervals)
+    times = np.arange(1, 13)
+    return np.clip(1 - weibull_min.sf(times, *params), 0, 1)
 
-    return model, feature_cols
+def poisson_process_predict(data):
+    """Enhanced Poisson Process prediction"""
+    monthly_rates = data.groupby('month').size().values
+    rate = monthly_rates.mean()
+    times = np.arange(1, 13)
+    return np.clip(1 - np.exp(-rate * times/12), 0, 1)
 
-### 4. Predict 2025 Outages
-def predict_2025(model, feature_cols, month_risks):
-    """
-    Generate predictions for each month in 2025
-    """
-    # Create features for 2025
-    future_months = pd.DataFrame({
-        'month': range(1, 13),
-        'day': 15,  # Middle of month
-        'hour': 12,  # Middle of day
-        'day_of_week': 0,
-        'is_business_hours': 1,
-        'is_quarter_end': [1 if m in [3,6,9,12] else 0 for m in range(1,13)],
-        'outages_last_90days': 0,  # Will need to be updated based on predictions
-        'outages_last_180days': 0   # Will need to be updated based on predictions
-    })
+def sarima_predict(data):
+    """SARIMA prediction with seasonal components"""
+    monthly_counts = pd.Series(index=pd.date_range(start='2020-01-01', end='2024-12-31', freq='M'))
+    for idx, row in data.iterrows():
+        date = pd.Timestamp(year=row['year'], month=row['month'], day=1)
+        monthly_counts[date] = 1
+    monthly_counts = monthly_counts.fillna(0)
 
-    # Add month risks
-    future_months['month_risk'] = future_months['month'].map(month_risks)
+    model = SARIMAX(monthly_counts, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
+    results = model.fit(disp=False)
+    return np.clip(results.forecast(steps=12), 0, 1)
 
-    # Generate predictions
-    probabilities = model.predict_proba(future_months[feature_cols])
+# Step 4: Main Analysis Function
+def analyze_application(df, app_name):
+    """Analyze single application data"""
+    print(f"\nAnalyzing {app_name}...")
 
-    # Create results DataFrame
-    predictions = pd.DataFrame({
-        'Month': future_months['month'],
-        'Risk_Score': future_months['month_risk'],
-        'Outage_Probability': probabilities[:, 1]
-    })
+    # Filter data for specific application
+    app_data = df[df['causer_acronym'] == app_name].copy()
+
+    # Create features
+    features = create_features(app_data)
+
+    # Prepare training data
+    X = features.drop(['historical_rate'], axis=1)
+    y = features['historical_rate']
+
+    # Prepare prediction features
+    X_pred = pd.DataFrame()
+    for month in range(1, 13):
+        month_features = pd.DataFrame({
+            'month': [month],
+            'is_weekend': [0],  # Average prediction
+            'is_night': [0],    # Average prediction
+            'is_spring': [1 if month in [3,4,5] else 0],
+            'is_summer': [1 if month in [6,7,8] else 0],
+            'is_fall': [1 if month in [9,10,11] else 0],
+            'is_winter': [1 if month in [12,1,2] else 0]
+        })
+        X_pred = pd.concat([X_pred, month_features])
+
+    # Generate predictions from all models
+    predictions = pd.DataFrame()
+    predictions['month'] = range(1, 13)
+
+    # Run all models
+    predictions['xgboost'] = xgboost_predict(X, y, X_pred)
+    predictions['random_forest'] = random_forest_predict(X, y, X_pred)
+    predictions['survival'] = survival_analysis_predict(app_data)
+    predictions['poisson'] = poisson_process_predict(app_data)
+    predictions['sarima'] = sarima_predict(app_data)
+
+    # Calculate ensemble prediction with weights
+    weights = {
+        'xgboost': 0.25,
+        'random_forest': 0.20,
+        'survival': 0.20,
+        'poisson': 0.15,
+        'sarima': 0.20
+    }
+
+    predictions['ensemble'] = sum(predictions[model] * weight
+                                for model, weight in weights.items())
+
+    # Calculate confidence intervals
+    std_dev = predictions[weights.keys()].std(axis=1)
+    predictions['ci_lower'] = np.clip(predictions['ensemble'] - 1.96 * std_dev, 0, 1)
+    predictions['ci_upper'] = np.clip(predictions['ensemble'] + 1.96 * std_dev, 0, 1)
 
     return predictions
 
-### 5. Main Execution
-def main(data):
-    # Prepare data
-    processed_df = prepare_data(data)
+# Step 5: Visualization Function
+def visualize_predictions(predictions, app_name):
+    """Create detailed visualization"""
+    plt.figure(figsize=(15, 8))
 
-    # Visualize patterns
-    visualize_patterns(processed_df)
+    # Plot individual model predictions
+    for col in ['xgboost', 'random_forest', 'survival', 'poisson', 'sarima']:
+        plt.plot(predictions['month'], predictions[col], '--', alpha=0.3, label=col)
 
-    # Train model
-    model, feature_cols = train_model(processed_df)
+    # Plot ensemble prediction
+    plt.plot(predictions['month'], predictions['ensemble'], 'k-',
+            linewidth=3, label='Ensemble')
 
-    # Get month risks
-    month_risks = calculate_month_risks(processed_df)
+    # Plot confidence interval
+    plt.fill_between(predictions['month'], predictions['ci_lower'],
+                    predictions['ci_upper'], color='gray', alpha=0.2,
+                    label='95% CI')
 
-    # Predict 2025
-    predictions = predict_2025(model, feature_cols, month_risks)
-
-    # Display results
-    print("\nPredicted Outage Probabilities for 2025:")
-    print(predictions.sort_values('Outage_Probability', ascending=False))
-
-    # Visualize predictions
-    plt.figure(figsize=(12, 6))
-    sns.barplot(x='Month', y='Outage_Probability', data=predictions)
-    plt.title('Predicted Outage Probabilities by Month (2025)')
+    plt.title(f'Outage Predictions 2025 - {app_name}')
     plt.xlabel('Month')
-    plt.ylabel('Probability of Outage')
-    plt.show()
+    plt.ylabel('Probability')
+    plt.grid(True)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig(f'predictions_{app_name}.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
-    return predictions
+# Step 6: Main Execution
+def main():
+    # Read data
+    df = pd.read_csv('your_data.csv')
+    df = load_and_preprocess_data(df)
 
-# Execute the analysis
-# Assuming your data is in a DataFrame called 'data'
-data = pd.DataFrame({
-    'incident_start_time_cst': your_datetime_column,
-    # ... other columns
-})
+    # Process each application
+    all_results = {}
+    for app in df['causer_acronym'].unique():
+        # Generate predictions
+        predictions = analyze_application(df, app)
 
-predictions = main(data)
+        # Save predictions to CSV
+        predictions.to_csv(f'predictions_{app}.csv', index=False)
+
+        # Create visualization
+        visualize_predictions(predictions, app)
+
+        all_results[app] = predictions
+        print(f"Completed analysis for {app}")
+
+    return all_results
+
+if __name__ == "__main__":
+    results = main()
