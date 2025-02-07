@@ -1,190 +1,375 @@
+"""
+FILE: all_approaches_single_script.py
+Dependencies (install if needed):
+  pip install pandas numpy xgboost scikit-learn statsmodels lifelines
+"""
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import matplotlib.pyplot as plt
-from scipy import stats
-from sklearn.ensemble import RandomForestRegressor
-import xgboost as xgb
+from xgboost import XGBClassifier
+from sklearn.utils import resample
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from lifelines import WeibullAFTFitter, LogNormalAFTFitter
-from scipy.stats import expon
-import warnings
-warnings.filterwarnings('ignore')
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from lifelines import CoxPHFitter
 
-def load_and_preprocess_data(df):
-    """Step 1: Load and preprocess the data"""
-    # Convert to datetime and fix any incorrect dates
-    df['incident_start_time_cst'] = pd.to_datetime(df['incident_start_time_cst'], errors='coerce')
+# ---------------------------------------------------------
+# 1) DATA PREP & CLEANING
+# ---------------------------------------------------------
 
-    # Remove rows with invalid dates
-    df = df.dropna(subset=['incident_start_time_cst'])
+def clean_and_prepare_data(df):
+    """
+    1. Parse 'incident_start_time_cst' to datetime.
+    2. Drop obviously invalid rows or fix them if possible:
+       - If year > 2025 or < 2020, drop or treat as invalid.
+       - If hours, minutes, seconds are out of range, fix or drop.
+    3. Restrict final set to 2020–2024 for training, but also
+       create placeholders for 2025 so we can later forecast.
+    4. Return the cleaned DataFrame with a new column 'incident_datetime'.
+    """
 
-    # Extract time features
-    df['year'] = df['incident_start_time_cst'].dt.year
-    df['month'] = df['incident_start_time_cst'].dt.month
-    df['day'] = df['incident_start_time_cst'].dt.day
-    df['hour'] = df['incident_start_time_cst'].dt.hour
-    df['dayofweek'] = df['incident_start_time_cst'].dt.dayofweek
+    # Try to coerce to datetime
+    df['incident_datetime'] = pd.to_datetime(df['incident_start_time_cst'], errors='coerce')
 
-    # Remove duplicates within same month/year
-    df = df.sort_values('incident_start_time_cst')
-    df = df.drop_duplicates(subset=['causer_acronym', 'year', 'month'], keep='first')
+    # Drop rows that could not be parsed
+    df = df.dropna(subset=['incident_datetime']).copy()
 
+    # Example: Drop or correct obviously invalid years or times
+    # Here, let's just drop rows with year outside 2020–2025
+    df['year_tmp'] = df['incident_datetime'].dt.year
+    df = df[(df['year_tmp'] >= 2020) & (df['year_tmp'] <= 2025)]
+
+    # Similarly, if you detect times with invalid minutes (e.g. 70, 76, 79),
+    # you can drop them or approximate. Below is a simple approach:
+    # We'll identify them and drop those rows:
+    def invalid_time_components(dt):
+        return (dt.minute > 59) or (dt.hour > 23)
+
+    # Mask for invalid
+    invalid_mask = df['incident_datetime'].apply(invalid_time_components)
+    df = df[~invalid_mask].copy()
+
+    # Return cleaned
     return df
 
-def create_features(data):
-    """Step 2: Feature Engineering"""
-    features = pd.DataFrame()
 
-    # Basic time features
-    features['month'] = data['month']
-    features['is_weekend'] = (data['dayofweek'] >= 5).astype(int)
-    features['is_business_hours'] = ((data['hour'] >= 9) & (data['hour'] <= 17)).astype(int)
+def aggregate_monthly_binary(df):
+    """
+    Group by (causer_acronym, year, month) => has_outage = 1 if >=1 outages in that month.
+    Also ensure placeholders for all months 2020–2025 (since we want to forecast 2025).
+    """
 
-    # Seasonal features
-    features['season'] = pd.cut(data['month'],
-                              bins=[0,3,6,9,12],
-                              labels=['Winter', 'Spring', 'Summer', 'Fall'])
+    # Extract year, month from the cleaned datetime
+    df['year'] = df['incident_datetime'].dt.year
+    df['month'] = df['incident_datetime'].dt.month
 
-    # Calculate time since last incident
-    data = data.sort_values('incident_start_time_cst')
-    data['time_since_last'] = data['incident_start_time_cst'].diff().dt.total_seconds() / (24*3600)
+    # Count tickets
+    grouped = (
+        df.groupby(['causer_acronym','year','month'])
+          .size()
+          .reset_index(name='ticket_count')
+    )
+    grouped['has_outage'] = (grouped['ticket_count'] >= 1).astype(int)
 
-    return features, data
+    # We'll include 2020–2025 for combos
+    all_causers = df['causer_acronym'].unique()
+    years = range(2020, 2026)   # up to 2025
+    months = range(1, 13)
+    combos = [(c, y, m) for c in all_causers for y in years for m in months]
+    combos_df = pd.DataFrame(combos, columns=['causer_acronym','year','month'])
 
-def advanced_survival_analysis(data):
-    """Step 3: Advanced Survival Analysis using Weibull AFT"""
-    # Prepare survival data
-    survival_data = pd.DataFrame()
-    survival_data['duration'] = data['time_since_last'].fillna(30)  # Fill first value with 30 days
-    survival_data['month'] = data['month']
-    survival_data['event'] = 1  # All events are observed
+    merged = pd.merge(
+        combos_df,
+        grouped[['causer_acronym','year','month','has_outage']],
+        on=['causer_acronym','year','month'],
+        how='left'
+    )
+    merged['has_outage'] = merged['has_outage'].fillna(0).astype(int)
 
-    # Fit Weibull AFT model
-    aft = WeibullAFTFitter()
-    try:
-        aft.fit(survival_data, duration_col='duration', event_col='event')
-        future_months = pd.DataFrame({'month': range(1, 13)})
-        predictions = aft.predict_median(future_months)
-        return np.clip(1 / predictions, 0, 1)  # Convert to probability
-    except:
-        return np.zeros(12) + 0.5  # Return neutral prediction if model fails
+    # Sort for consistent ordering
+    merged.sort_values(['causer_acronym','year','month'], inplace=True)
+    return merged
 
-def exponential_smoothing_predict(data):
-    """Step 4: Exponential Smoothing"""
-    monthly_counts = pd.Series(index=pd.date_range(start='2020-01-01',
-                                                 end='2024-12-31',
-                                                 freq='M'))
 
-    for idx, row in data.iterrows():
-        date = pd.Timestamp(year=row['year'], month=row['month'], day=1)
-        monthly_counts[date] = 1
+def build_basic_features(merged):
+    """
+    Add cyclical month features + lag1_outage.
+    Creates a 'date' column (YYYY-MM-01).
+    """
+    merged['month_sin'] = np.sin(2*np.pi * merged['month']/12)
+    merged['month_cos'] = np.cos(2*np.pi * merged['month']/12)
 
-    monthly_counts = monthly_counts.fillna(0)
+    # Group-lag
+    merged['lag1_outage'] = merged.groupby('causer_acronym')['has_outage'].shift(1).fillna(0)
 
-    try:
-        model = ExponentialSmoothing(monthly_counts,
-                                   seasonal_periods=12,
-                                   trend='add',
-                                   seasonal='add')
-        fitted_model = model.fit()
-        predictions = fitted_model.forecast(12)
-        return np.clip(predictions, 0, 1)
-    except:
-        return np.zeros(12) + 0.5
+    # Create date
+    merged['date'] = pd.to_datetime(
+        merged['year'].astype(str) + '-' + merged['month'].astype(str) + '-01'
+    )
 
-def mathematical_model(data):
-    """Step 5: Mathematical Model - Modified Exponential"""
-    monthly_rates = []
-    for month in range(1, 13):
-        month_data = data[data['month'] == month]
-        if len(month_data) > 0:
-            time_diffs = month_data['time_since_last'].dropna()
-            if len(time_diffs) > 0:
-                rate = 1 / time_diffs.mean() if time_diffs.mean() > 0 else 0.5
-                monthly_rates.append(rate)
-            else:
-                monthly_rates.append(0.5)
+    return merged
+
+
+# ---------------------------------------------------------
+# 2) CLASSIFICATION APPROACH (XGBoost) + Weighted Recent Years
+# ---------------------------------------------------------
+
+def train_xgb_classification(merged):
+    """
+    Train on 2020–2024 (all rows) with heavier weights for 2023–2024.
+    Return the fitted model.
+    """
+    # Filter training data
+    train_df = merged[(merged['year'] >= 2020) & (merged['year'] <= 2024)].copy()
+
+    features = ['month_sin','month_cos','lag1_outage']
+    target   = 'has_outage'
+
+    def year_to_weight(y):
+        if y == 2023:
+            return 2.0
+        elif y == 2024:
+            return 3.0
         else:
-            monthly_rates.append(0.5)
+            return 1.0
 
-    return np.clip(monthly_rates, 0, 1)
+    sample_w = train_df['year'].apply(year_to_weight).values
 
-def analyze_application(df, app_name):
-    """Step 6: Main Analysis Function"""
-    print(f"\nAnalyzing {app_name}...")
+    from xgboost import XGBClassifier
+    model = XGBClassifier(n_estimators=100, max_depth=4, learning_rate=0.1, random_state=42, use_label_encoder=False)
+    model.fit(train_df[features], train_df[target], sample_weight=sample_w)
 
-    # Filter data for specific application
-    app_data = df[df['causer_acronym'] == app_name].copy()
+    return model
 
-    # Create features
-    features, app_data = create_features(app_data)
 
-    # Generate predictions
-    predictions = pd.DataFrame()
-    predictions['month'] = range(1, 13)
+def predict_2025_xgb(xgb_model, merged, n_bootstraps=50):
+    """
+    Predict monthly outage probability for 2025 rows,
+    plus a simple bootstrap-based confidence interval for the *average* predicted probability.
+    Returns a DataFrame with columns:
+      causer_acronym, year=2025, month, predicted_prob, lower_ci, upper_ci (global for average).
+    """
 
-    # Run all models
-    predictions['survival'] = advanced_survival_analysis(app_data)
-    predictions['exp_smoothing'] = exponential_smoothing_predict(app_data)
-    predictions['mathematical'] = mathematical_model(app_data)
+    # Subset 2025
+    df_2025 = merged[merged['year'] == 2025].copy()
+    if df_2025.empty:
+        raise ValueError("No 2025 data found. Ensure you included 2025 in your combos.")
 
-    # Calculate ensemble with weights
-    weights = {
-        'survival': 0.4,
-        'exp_smoothing': 0.3,
-        'mathematical': 0.3
-    }
+    features = ['month_sin','month_cos','lag1_outage']
 
-    predictions['ensemble'] = sum(predictions[model] * weight
-                                for model, weight in weights.items())
+    # Predict
+    df_2025['predicted_prob'] = xgb_model.predict_proba(df_2025[features])[:,1]
 
-    # Calculate confidence intervals
-    std_dev = predictions[weights.keys()].std(axis=1)
-    predictions['ci_lower'] = np.clip(predictions['ensemble'] - 1.96 * std_dev, 0, 1)
-    predictions['ci_upper'] = np.clip(predictions['ensemble'] + 1.96 * std_dev, 0, 1)
+    # Bootstrap approach for overall average probability
+    boot_means = []
+    for i in range(n_bootstraps):
+        df_samp = resample(df_2025, random_state=42+i)
+        probs_samp = xgb_model.predict_proba(df_samp[features])[:,1]
+        boot_means.append(np.mean(probs_samp))
 
-    return predictions
+    lower_ci = np.percentile(boot_means, 2.5)
+    upper_ci = np.percentile(boot_means, 97.5)
 
-def main():
-    """Step 7: Main Execution"""
-    # Read data
-    df = pd.read_csv('your_data.csv')
-    df = load_and_preprocess_data(df)
+    df_2025['avg_prob_boot_mean'] = np.mean(df_2025['predicted_prob'])
+    df_2025['avg_prob_lower_ci']  = lower_ci
+    df_2025['avg_prob_upper_ci']  = upper_ci
 
-    # Create Excel writer
-    with pd.ExcelWriter('outage_predictions_2025.xlsx') as writer:
-        # Process each application
-        for app in df['causer_acronym'].unique():
-            # Generate predictions
-            predictions = analyze_application(df, app)
+    return df_2025
 
-            # Save to Excel sheet
-            predictions.to_excel(writer, sheet_name=app[:31], index=False)
 
-            # Create visualization
-            plt.figure(figsize=(15, 8))
-            for col in ['survival', 'exp_smoothing', 'mathematical']:
-                plt.plot(predictions['month'], predictions[col], '--',
-                        alpha=0.3, label=col)
+# ---------------------------------------------------------
+# 3) EXPONENTIAL SMOOTHING (Holt-Winters)
+# ---------------------------------------------------------
 
-            plt.plot(predictions['month'], predictions['ensemble'], 'k-',
-                    linewidth=3, label='Ensemble')
-            plt.fill_between(predictions['month'],
-                           predictions['ci_lower'],
-                           predictions['ci_upper'],
-                           color='gray', alpha=0.2,
-                           label='95% CI')
+def train_and_forecast_exponential_smoothing(merged, causer, steps=12):
+    """
+    Example: For a single causer_acronym, get the monthly 0/1 series (2020–2024),
+    fit a Holt-Winters model, then forecast 'steps' months (which might be 2025).
+    Returns a DataFrame with forecast + naive confidence intervals.
+    """
 
-            plt.title(f'Outage Predictions 2025 - {app}')
-            plt.xlabel('Month')
-            plt.ylabel('Probability')
-            plt.grid(True)
-            plt.legend()
-            plt.savefig(f'prediction_plot_{app}.png')
-            plt.close()
+    cdf = merged[merged['causer_acronym'] == causer].copy()
+    cdf = cdf[(cdf['year'] >= 2020) & (cdf['year'] <= 2024)].copy()
 
-            print(f"Completed analysis for {app}")
+    # Index by date
+    cdf.set_index('date', inplace=True)
+    cdf = cdf.asfreq('MS')  # monthly start freq
+    cdf['has_outage'].fillna(0, inplace=True)
+
+    y = cdf['has_outage']
+
+    # Fit
+    model = ExponentialSmoothing(y, trend=None, seasonal='add', seasonal_periods=12)
+    res = model.fit()
+
+    # Forecast
+    fcast_vals = res.forecast(steps=steps)
+
+    # Confidence intervals (naive)
+    # we estimate residual std dev
+    residuals = res.fittedvalues - y
+    std_err = np.std(residuals)
+    alpha = 1.96  # ~95% CI
+    lower = fcast_vals - alpha * std_err
+    upper = fcast_vals + alpha * std_err
+
+    df_fcast = pd.DataFrame({
+        'forecast': fcast_vals,
+        'lower_ci': lower,
+        'upper_ci': upper
+    })
+
+    return df_fcast
+
+
+# ---------------------------------------------------------
+# 4) SARIMA (ARIMA)
+# ---------------------------------------------------------
+
+def train_and_forecast_sarima(merged, causer, steps=12):
+    """
+    For a single causer_acronym, monthly 0/1 data from 2020–2024,
+    fit a SARIMA model (1,1,1)(0,1,1,12) then forecast steps months (2025).
+    Returns a DataFrame with forecast + confidence intervals from model.
+    """
+
+    cdf = merged[merged['causer_acronym'] == causer].copy()
+    cdf = cdf[(cdf['year'] >= 2020) & (cdf['year'] <= 2024)].copy()
+
+    cdf.set_index('date', inplace=True)
+    cdf = cdf.asfreq('MS')
+    cdf['has_outage'].fillna(0, inplace=True)
+
+    y = cdf['has_outage']
+
+    model = SARIMAX(y, order=(1,1,1), seasonal_order=(0,1,1,12), trend='n',
+                    enforce_stationarity=False, enforce_invertibility=False)
+    results = model.fit(disp=False)
+
+    forecast_obj = results.get_forecast(steps=steps)
+    mean_forecast = forecast_obj.predicted_mean
+    conf_int = forecast_obj.conf_int()
+
+    df_out = pd.DataFrame({
+        'forecast': mean_forecast
+    }, index=mean_forecast.index)
+    df_out[['lower_ci','upper_ci']] = conf_int
+
+    return df_out
+
+
+# ---------------------------------------------------------
+# 5) SURVIVAL ANALYSIS
+# ---------------------------------------------------------
+
+def prepare_survival_data(df, causer):
+    """
+    For survival analysis, we want time-to-next-outage.
+    We'll filter for the chosen causer, sort by incident_datetime,
+    then compute difference to the next outage.
+
+    event=1 if the next outage is observed, 0 if censored.
+    T = number of days to next outage.
+    """
+    cdf = df[df['causer_acronym'] == causer].copy()
+    cdf = cdf.sort_values('incident_datetime').reset_index(drop=True)
+
+    cdf['next_datetime'] = cdf['incident_datetime'].shift(-1)
+    cdf['time_diff'] = (cdf['next_datetime'] - cdf['incident_datetime']).dt.days
+
+    # The last record has no "next outage" => censored
+    cdf['event'] = np.where(cdf['time_diff'].notnull(), 1, 0)
+
+    # Drop the last row if time_diff is NaN (censored) or keep it with event=0
+    cdf.dropna(subset=['time_diff'], inplace=True)
+
+    # Minimal survival set
+    sdata = pd.DataFrame({
+        'T': cdf['time_diff'],
+        'event': cdf['event']
+    })
+    # You can add more covariates if you like (month, year, etc.)
+    # We'll just do a dummy feature for demonstration.
+    sdata['dummy_feature'] = 1.0
+
+    return sdata
+
+
+def run_cox_survival_analysis(sdata):
+    """
+    Fit a Cox Proportional Hazards model on the survival data.
+    Returns the fitted model plus a summary.
+    """
+    cph = CoxPHFitter()
+    cph.fit(sdata, duration_col='T', event_col='event', show_progress=False)
+    return cph
+
+
+# ---------------------------------------------------------
+# MAIN EXAMPLE OF USAGE
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+
+    # --------------------------------------------------------------------
+    # A) Suppose you have a dataframe 'return_df' from the uploaded doc.
+    #    We'll just call it df here.
+    #    For example:
+    ######################################################################
+    # df = return_df  # <--- you already have it in your environment
+    #
+    # OR if you read from CSV:
+    # df = pd.read_csv("some_outage_data.csv")
+    ######################################################################
+
+    # We'll pretend we have it:
+    print("=== SAMPLE RUN of All Approaches ===")
+
+    # 1) Clean data
+    # df = clean_and_prepare_data(df)  # UNCOMMENT once you have real df
+
+    # 2) Create monthly binary aggregator + placeholder for 2025
+    # merged = aggregate_monthly_binary(df)
+
+    # 3) Add features (cyclical month, lag1_outage, date)
+    # merged = build_basic_features(merged)
+
+    # ==========================
+    # Classification (XGBoost)
+    # ==========================
+    # xgb_model = train_xgb_classification(merged)
+    # predictions_2025 = predict_2025_xgb(xgb_model, merged, n_bootstraps=50)
+    # print("XGBoost Predictions for 2025 (first few rows):")
+    # print(predictions_2025.head(10))
+
+    # ==========================
+    # Exponential Smoothing
+    # ==========================
+    # example_causer = "Digital IDP"
+    # es_forecast = train_and_forecast_exponential_smoothing(merged, example_causer, steps=12)
+    # print("\nHolt-Winters forecast for 2025 (first few rows):")
+    # print(es_forecast.head())
+
+    # ==========================
+    # SARIMA (ARIMA)
+    # ==========================
+    # sarima_forecast = train_and_forecast_sarima(merged, example_causer, steps=12)
+    # print("\nSARIMA forecast for 2025 (first few rows):")
+    # print(sarima_forecast.head())
+
+    # ==========================
+    # Survival Analysis
+    # ==========================
+    # sdata = prepare_survival_data(df, example_causer)
+    # cph_model = run_cox_survival_analysis(sdata)
+    # print("\nCOX PH Model summary:")
+    # print(cph_model.summary)
+    #
+    # # Example: get survival function for the 'average' row
+    # print("\nSurvival function at a range of times:")
+    # print(cph_model.predict_survival_function(sdata.iloc[[0]]).head(30))
+
+    print("""
+All stubs/methods are defined in this single file.
+Uncomment and adapt as needed once you have your 'return_df' dataframe
+plugged in. Then you can run the classification, Exponential Smoothing,
+SARIMA, and survival analysis approaches in one place.
+""")
