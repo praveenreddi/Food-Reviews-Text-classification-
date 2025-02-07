@@ -1,128 +1,130 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-
-def clean_and_prepare_data(df):
-    """Clean and prepare the initial data"""
-    df['incident_datetime'] = pd.to_datetime(df['incident_start_time_cst'], errors='coerce')
-    df = df.dropna(subset=['incident_datetime']).copy()
-    df['year_tmp'] = df['incident_datetime'].dt.year
-    df = df[(df['year_tmp'] >= 2020) & (df['year_tmp'] <= 2025)]
-
-    # Drop invalid time components
-    def invalid_time_components(dt):
-        return (dt.minute > 59) or (dt.hour > 23)
-    invalid_mask = df['incident_datetime'].apply(invalid_time_components)
-    df = df[~invalid_mask].copy()
-
-    return df
-
-def aggregate_monthly_binary(df):
-    """Create monthly binary aggregation with placeholders"""
-    df['year'] = df['incident_datetime'].dt.year
-    df['month'] = df['incident_datetime'].dt.month
-
-    # Count tickets and create binary indicator
-    grouped = (
-        df.groupby(['causer_acronym','year','month'])
-          .size()
-          .reset_index(name='ticket_count')
-    )
-    grouped['has_outage'] = (grouped['ticket_count'] >= 1).astype(int)
-
-    # Create all possible combinations for 2020-2025
-    all_causers = df['causer_acronym'].unique()
-    years = range(2020, 2026)
-    months = range(1, 13)
-    combos = [(c, y, m) for c in all_causers for y in years for m in months]
-    combos_df = pd.DataFrame(combos, columns=['causer_acronym','year','month'])
-
-    # Merge with actual data
-    merged = pd.merge(
-        combos_df,
-        grouped[['causer_acronym','year','month','has_outage']],
-        on=['causer_acronym','year','month'],
-        how='left'
-    )
-    merged['has_outage'] = merged['has_outage'].fillna(0).astype(int)
-
-    # Sort for consistency
-    merged.sort_values(['causer_acronym','year','month'], inplace=True)
-    return merged
-
-def build_basic_features(merged):
-    """Add engineered features"""
-    # Cyclical month encoding
-    merged['month_sin'] = np.sin(2*np.pi * merged['month']/12)
-    merged['month_cos'] = np.cos(2*np.pi * merged['month']/12)
-
-    # Lag feature
-    merged['lag1_outage'] = merged.groupby('causer_acronym')['has_outage'].shift(1).fillna(0)
-
-    # Create proper datetime
-    merged['date'] = pd.to_datetime(
-        merged['year'].astype(str) + '-' +
-        merged['month'].astype(str) + '-01'
-    )
-
-    return merged
+from scipy.stats import norm
 
 def train_and_forecast_exponential_smoothing(merged, causer, steps=12):
     """
-    Fit Holt-Winters model and forecast future values
-
-    Parameters:
-    merged: DataFrame with columns [causer_acronym, date, has_outage, year]
-    causer: str, specific causer to analyze
-    steps: int, number of months to forecast
+    Modified version with improved confidence interval calculation
     """
-    # Filter data for specific causer and time range
+    # Filter and prepare data
     cdf = merged[merged['causer_acronym'] == causer].copy()
     cdf = cdf[(cdf['year'] >= 2020) & (cdf['year'] <= 2024)].copy()
 
-    # Set date as index and ensure monthly frequency
     cdf.set_index('date', inplace=True)
-    cdf = cdf.asfreq('MS')  # monthly start freq
+    cdf = cdf.asfreq('MS')
     cdf['has_outage'].fillna(0, inplace=True)
 
     y = cdf['has_outage']
 
-    # Fit model and forecast
-    model = ExponentialSmoothing(y, trend=None, seasonal='add', seasonal_periods=12)
+    # Fit model
+    model = ExponentialSmoothing(y,
+                                trend=None,
+                                seasonal='add',
+                                seasonal_periods=12)
     res = model.fit()
+
+    # Generate forecast
     fcast_vals = res.forecast(steps=steps)
 
-    # Calculate confidence intervals
+    # Calculate prediction intervals using a different approach
     residuals = res.fittedvalues - y
-    std_err = np.std(residuals)
-    alpha = 1.96  # ~95% CI
-    lower = fcast_vals - alpha * std_err
-    upper = fcast_vals + alpha * std_err
+    sigma = np.sqrt(np.sum(residuals**2) / (len(residuals) - 1))
+
+    # Calculate confidence intervals using prediction standard errors
+    z_score = norm.ppf(0.975)  # 95% confidence level
+    pred_std = np.sqrt(sigma**2 * (1 + 1/len(y)))
+
+    lower = fcast_vals - z_score * pred_std
+    upper = fcast_vals + z_score * pred_std
+
+    # Bound the forecasts and CIs between 0 and 1 with a more nuanced approach
+    fcast_vals = np.clip(fcast_vals, 0.001, 0.999)
+    lower = np.clip(lower, 0.001, 0.999)
+    upper = np.clip(upper, 0.001, 0.999)
+
+    # Ensure lower <= forecast <= upper
+    lower = np.minimum(lower, fcast_vals)
+    upper = np.maximum(upper, fcast_vals)
+
+    # Create forecast DataFrame with date index
+    forecast_dates = pd.date_range(start=y.index[-1] + pd.DateOffset(months=1),
+                                 periods=steps,
+                                 freq='MS')
 
     df_fcast = pd.DataFrame({
         'forecast': fcast_vals,
         'lower_ci': lower,
         'upper_ci': upper
-    })
+    }, index=forecast_dates)
 
-    return df_fcast
+    return df_fcast, y
+
+def plot_forecast_with_history(forecast_df, history, causer_name):
+    """
+    Plot the forecast with history and confidence intervals
+    """
+    plt.figure(figsize=(12, 6))
+
+    # Plot historical values
+    plt.plot(history.index, history.values,
+            label='Historical', color='blue', marker='o', markersize=4)
+
+    # Plot forecast
+    plt.plot(forecast_df.index, forecast_df['forecast'],
+            label='Forecast', color='red', linestyle='--')
+
+    # Plot confidence intervals
+    plt.fill_between(forecast_df.index,
+                    forecast_df['lower_ci'],
+                    forecast_df['upper_ci'],
+                    color='red', alpha=0.2,
+                    label='95% Confidence Interval')
+
+    plt.title(f'Outage Forecast for {causer_name}')
+    plt.xlabel('Date')
+    plt.ylabel('Probability of Outage')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+
+    # Set y-axis limits with some padding
+    plt.ylim(-0.05, 1.05)
+
+    # Rotate x-axis labels
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    return plt
+
+def print_forecast_summary(forecast_df):
+    """
+    Print a nicely formatted forecast summary
+    """
+    print("\nMonthly Forecast Summary:")
+    print("-" * 70)
+    print(f"{'Month':<12} {'Forecast':>10} {'Lower CI':>12} {'Upper CI':>12} {'CI Width':>12}")
+    print("-" * 70)
+
+    for idx, row in forecast_df.iterrows():
+        ci_width = row['upper_ci'] - row['lower_ci']
+        print(f"{idx.strftime('%Y-%m'):<12} "
+              f"{row['forecast']:>10.3f} "
+              f"{row['lower_ci']:>12.3f} "
+              f"{row['upper_ci']:>12.3f} "
+              f"{ci_width:>12.3f}")
 
 # Example usage:
 if __name__ == "__main__":
-    # Assuming you have your data in a DataFrame called 'return_df'
-    # df = return_df  # or df = pd.read_csv("your_data.csv")
+    # Assuming you have your data prepared
+    # merged = ... [your data preparation steps]
 
-    # 1. Clean and prepare data
-    # df = clean_and_prepare_data(df)
+    example_causer = "Digital IDP"
+    # forecast_df, history = train_and_forecast_exponential_smoothing(merged, example_causer)
 
-    # 2. Create monthly aggregation with placeholders
-    # merged = aggregate_monthly_binary(df)
+    # Create visualization
+    # fig = plot_forecast_with_history(forecast_df, history, example_causer)
+    # plt.show()
 
-    # 3. Add engineered features
-    # merged = build_basic_features(merged)
-
-    # 4. Run forecasting for a specific causer
-    # example_causer = "Digital IDP"
-    # forecast = train_and_forecast_exponential_smoothing(merged, example_causer, steps=12)
-    # print("\nForecast for 2025:")
-    # print(forecast)
+    # Print detailed forecast summary
+    # print_forecast_summary(forecast_df)
