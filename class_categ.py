@@ -1,239 +1,206 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from scipy.stats import norm
+import time
+import threading
 from datetime import datetime
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import json
+import pandas as pd
+import base64
 
-def clean_and_prepare_data(df):
-    """Clean and prepare the initial data"""
-    print("Cleaning and preparing data...")
+# Initial setup
+%run ./config_files/configs
+%run -/GetAccess Token
+%run - /custom_APIs
 
-    # Convert to datetime
-    df['incident_datetime'] = pd.to_datetime(df['incident_start_time_cst'], errors='coerce')
+class TokenManager:
+    def __init__(self):
+        self.last_refresh_time = time.time()
+        self.refresh_interval = 3500  # 58 minutes in seconds
+        self.lock = threading.Lock()
 
-    # Remove rows with null datetime
-    df = df.dropna(subset=['incident_datetime']).copy()
+    def refresh_if_needed(self):
+        current_time = time.time()
+        with self.lock:
+            if (current_time - self.last_refresh_time) >= self.refresh_interval:
+                print(f"\nRefreshing token at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                try:
+                    # Run the token refresh notebooks
+                    dbutils.notebook.run("./config_files/configs", timeout_seconds=300)
+                    dbutils.notebook.run("./GetAccess Token", timeout_seconds=300)
+                    dbutils.notebook.run("./custom_APIs", timeout_seconds=300)
 
-    # Extract year for filtering
-    df['year'] = df['incident_datetime'].dt.year
-    df = df[(df['year'] >= 2020) & (df['year'] <= 2025)]
+                    # Reinitialize the LLM
+                    global llm
+                    llm = LlamaLLM(llm_model="llama")
 
-    # Remove invalid time entries
-    def invalid_time_components(dt):
-        return (dt.minute > 59) or (dt.hour > 23)
-    invalid_mask = df['incident_datetime'].apply(invalid_time_components)
-    df = df[~invalid_mask].copy()
+                    self.last_refresh_time = time.time()
+                    print("Token refresh successful")
+                except Exception as e:
+                    print(f"Error refreshing token: {str(e)}")
+                    raise
 
-    return df
+# Initialize LLM and TokenManager
+llm = LlamaLLM(llm_model="llama")
+token_manager = TokenManager()
 
-def aggregate_monthly_binary(df):
-    """Create monthly binary aggregation with placeholders"""
-    print("Aggregating monthly data...")
+def get_system_message_modified():
+    system_message = """Analyze the sentiment and emotion in the following comment.
+    Classify the emotion into one of these specific categories:
+    Happy, Sad, Angry, Frustration, Sarcastic, Neutral, Surprised, Fear, Unhappy, or Unknown.
+    Respond with a JSON object containing:
+    "emotion_summary": one of the specified emotions listed above,
+    "emotion_confidence": confidence score between 0 and 1
 
-    # Extract month
-    df['month'] = df['incident_datetime'].dt.month
+    Guidelines for classification:
+    - Happy: expressions of joy, satisfaction, excitement, positive feelings
+    - Sad: expressions of sadness, disappointment
+    - Angry: expressions of anger, rage
+    - Frustration: expressions of frustration, annoyance
+    - Sarcastic: expressions of sarcasm, irony
+    - Neutral: no clear emotion, objective statements
+    - Surprised: expressions of surprise, shock, amazement
+    - Fear: expressions of fear, worry, anxiety
+    - Unhappy: expressions of general unhappiness, discontent
+    - Unknown: use when the emotion is unclear, ambiguous, or cannot be determined with confidence
 
-    # Create binary indicator for outages
-    grouped = (
-        df.groupby(['causer_acronym', 'year', 'month'])
-        .size()
-        .reset_index(name='ticket_count')
-    )
-    grouped['has_outage'] = (grouped['ticket_count'] >= 1).astype(int)
+    Important:
+    - Always respond with exactly one of these 10 emotions: Happy, Sad, Angry, Frustration, Sarcastic, Neutral, Surprised, Fear, Unhappy, Unknown
+    - Use 'Unknown' when you're not confident about the emotion or when the text is unclear
+    - If confidence is below 0.4, default to 'Unknown'
 
-    # Create all possible combinations
-    all_causers = df['causer_acronym'].unique()
-    years = range(2020, 2026)
-    months = range(1, 13)
-    combos = [(c, y, m) for c in all_causers for y in years for m in months]
-    combos_df = pd.DataFrame(combos, columns=['causer_acronym', 'year', 'month'])
+    Do not use any other emotion categories"""
+    return system_message
 
-    # Merge with actual data
-    merged = pd.merge(combos_df, grouped,
-                     on=['causer_acronym', 'year', 'month'],
-                     how='left')
-    merged['has_outage'] = merged['has_outage'].fillna(0)
+def build_prompt_message_modified(system_message, user_comment):
+    delimiter = "####"
+    return [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": f"{user_comment}"}
+    ]
 
-    return merged
+def classify_comment_rationale(user_comment):
+    # Check and refresh token if needed
+    token_manager.refresh_if_needed()
 
-def build_basic_features(merged):
-    """Add engineered features"""
-    print("Building features...")
-
-    # Cyclical month encoding
-    merged['month_sin'] = np.sin(2*np.pi * merged['month']/12)
-    merged['month_cos'] = np.cos(2*np.pi * merged['month']/12)
-
-    # Create lag feature
-    merged['lag1_outage'] = merged.groupby('causer_acronym')['has_outage'].shift(1).fillna(0)
-
-    # Create proper datetime
-    merged['date'] = pd.to_datetime(
-        merged['year'].astype(str) + '-' +
-        merged['month'].astype(str) + '-01'
-    )
-
-    return merged
-
-def train_and_forecast_exponential_smoothing(merged, causer, steps=12):
-    """Train model and generate forecasts"""
+    system_message = get_system_message_modified()
+    messages = build_prompt_message_modified(system_message, user_comment)
     try:
-        cdf = merged[merged['causer_acronym'] == causer].copy()
-        cdf = cdf[(cdf['year'] >= 2020) & (cdf['year'] <= 2024)].copy()
+        completion = llm_call(messages)
 
-        cdf.set_index('date', inplace=True)
-        cdf = cdf.asfreq('MS')
-        cdf['has_outage'].fillna(0, inplace=True)
+        try:
+            response_json = json.loads(completion)
+            emotion = response_json.get("emotion_summary", "neutral")
+            confidence = float(response_json.get("emotion_confidence", 0.5))
 
-        y = cdf['has_outage']
+            if emotion is None:
+                print("No emotion_summary in response")
+                return ("neutral", 0.5)
+            if confidence is None:
+                print("No emotion_confidence in response")
+                confidence = 0.5
+            else:
+                confidence = float(confidence)
+            return (emotion, confidence)
 
-        model = ExponentialSmoothing(y, trend=None, seasonal='add', seasonal_periods=12)
-        res = model.fit()
-        fcast_vals = res.forecast(steps=steps)
+        except json.JSONDecodeError as je:
+            print(f"JSON decode error: {je}")
+            print(f"Problematic text: {completion}")
+            return ("neutral", 0.5)
 
-        residuals = res.fittedvalues - y
-        sigma = np.sqrt(np.sum(residuals**2) / (len(residuals) - 1))
-        z_score = norm.ppf(0.975)
-        pred_std = np.sqrt(sigma**2 * (1 + 1/len(y)))
-
-        lower = fcast_vals - z_score * pred_std
-        upper = fcast_vals + z_score * pred_std
-
-        fcast_vals = np.clip(fcast_vals, 0.001, 0.999)
-        lower = np.clip(lower, 0.001, 0.999)
-        upper = np.clip(upper, 0.001, 0.999)
-
-        lower = np.minimum(lower, fcast_vals)
-        upper = np.maximum(upper, fcast_vals)
-
-        forecast_dates = pd.date_range(start=y.index[-1] + pd.DateOffset(months=1),
-                                     periods=steps,
-                                     freq='MS')
-
-        df_fcast = pd.DataFrame({
-            'forecast': fcast_vals,
-            'lower_ci': lower,
-            'upper_ci': upper
-        }, index=forecast_dates)
-
-        return df_fcast, y, True
     except Exception as e:
-        print(f"Error processing {causer}: {str(e)}")
-        return None, None, False
+        print(f"Error in classification: {str(e)}")
+        return ("neutral", 0.5)
 
-def process_all_applications(merged):
-    """Process all applications and compile results"""
-    applications = merged['causer_acronym'].unique()
+def process_chunk(chunk_df):
+    chunk_results = {}
+    for column in chunk_df.columns:
+        chunk_results[column] = {}
+        for idx, text in chunk_df[column].items():
+            if pd.isna(text) or not isinstance(text, str) or not text.strip():
+                chunk_results[column][idx] = (None, None)
+            else:
+                chunk_results[column][idx] = classify_comment_rationale(str(text))
+    return chunk_results
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"forecast_results_{timestamp}"
-    plots_dir = f"{output_dir}/plots"
-    os.makedirs(plots_dir, exist_ok=True)
+def split_into_chunks(data, chunk_size=100):
+    all_indices = data.index.tolist()
+    chunk_list = []
+    for i in range(0, len(all_indices), chunk_size):
+        chunk_indices = all_indices[i:i+chunk_size]
+        chunk_list.append(chunk_indices)
+    return chunk_list
 
-    all_results = []
-
-    for app in applications:
-        print(f"\nProcessing {app}...")
-        forecast_df, history, success = train_and_forecast_exponential_smoothing(merged, app)
-
-        if success:
-            app_results = forecast_df.copy()
-            app_results['application'] = app
-            app_results['date'] = app_results.index
-            all_results.append(app_results)
-
-            fig = plot_forecast_with_history(forecast_df, history, app)
-            plt.savefig(f"{plots_dir}/{app.replace('/', '_')}_forecast.png")
-            plt.close()
-
-            print(f"Successfully processed {app}")
-        else:
-            print(f"Failed to process {app}")
-
-    if all_results:
-        final_results = pd.concat(all_results, axis=0)
-
-        csv_file = f"{output_dir}/forecast_results.csv"
-        final_results.to_csv(csv_file, index=False)
-
-        summary_stats = create_summary_statistics(final_results)
-        summary_file = f"{output_dir}/forecast_summary.csv"
-        summary_stats.to_csv(summary_file, index=True)
-
-        return final_results, csv_file
-    else:
-        print("No results to save!")
-        return None, None
-
-def create_summary_statistics(final_results):
-    """Create summary statistics"""
-    summary_stats = final_results.groupby('application').agg({
-        'forecast': ['mean', 'min', 'max'],
-        'lower_ci': 'mean',
-        'upper_ci': 'mean'
-    }).round(3)
-
-    summary_stats['ci_width'] = (summary_stats[('upper_ci', 'mean')] -
-                                summary_stats[('lower_ci', 'mean')]).round(3)
-
-    return summary_stats
-
-def plot_forecast_with_history(forecast_df, history, causer_name):
-    """Create forecast plots"""
-    plt.figure(figsize=(12, 6))
-
-    plt.plot(history.index, history.values,
-            label='Historical', color='blue', marker='o', markersize=4)
-
-    plt.plot(forecast_df.index, forecast_df['forecast'],
-            label='Forecast', color='red', linestyle='--')
-
-    plt.fill_between(forecast_df.index,
-                    forecast_df['lower_ci'],
-                    forecast_df['upper_ci'],
-                    color='red', alpha=0.2,
-                    label='95% Confidence Interval')
-
-    plt.title(f'Outage Forecast for {causer_name}')
-    plt.xlabel('Date')
-    plt.ylabel('Probability of Outage')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.ylim(-0.05, 1.05)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    return plt
-
-# Main execution
-if __name__ == "__main__":
-    # Read the input data
+def main():
     try:
-        print("Reading input data...")
-        # Replace 'your_input_file.csv' with your actual file name
-        input_file = 'your_input_file.csv'
-        df = pd.read_csv(input_file)
+        # Data loading and preparation
+        csv_path = "abfss://opsdashboards@blackbirdprodflatastore.dfs.core.windows.net/VOC/pitch26/CSAT/csat_forsee.csv"
+        decoded_sas_token = base64.b64decode(sas_token).decode()
+        columns_to_process = ["IMPROVEMENT_OE", "LOGIN_OE", "PROFILE_OE", "NAVIGATION_OE"]
 
-        # Data preparation pipeline
-        cleaned_df = clean_and_prepare_data(df)
-        monthly_data = aggregate_monthly_binary(cleaned_df)
-        merged = build_basic_features(monthly_data)
+        # Read data
+        combined_data = pd.read_csv(csv_path, storage_options={"sas_token": decoded_sas_token})
 
-        # Process all applications
-        print("\nStarting forecast processing...")
-        results, csv_file = process_all_applications(merged)
+        # Prepare result columns
+        result_columns = {}
+        for column in columns_to_process:
+            result_columns[column] = [
+                f"emotion_summary_{column}",
+                f"emotion_confidence_{column}"
+            ]
+            for result_col in result_columns[column]:
+                combined_data[result_col] = None
 
-        if results is not None:
-            print(f"\nResults successfully saved to: {csv_file}")
-            print("\nSample of results:")
-            print(results.head())
+        # Prepare valid data
+        valid_masks = {col: combined_data[col].notna() for col in columns_to_process}
+        valid_data = combined_data[columns_to_process].loc[valid_masks[columns_to_process[0]]]
 
-            # Print summary statistics
-            print("\nSummary Statistics:")
-            summary_stats = create_summary_statistics(results)
-            print(summary_stats)
+        # Split into chunks
+        CHUNK_SIZE = 100
+        tasks = split_into_chunks(valid_data, chunk_size=CHUNK_SIZE)
+        print(f"Split data into {len(tasks)} chunks")
+
+        # Process chunks in parallel
+        results_dict = {col: {} for col in columns_to_process}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_chunk = {}
+
+            # Submit all chunks
+            for i, chunk_indices in enumerate(tasks):
+                chunk_df = valid_data.loc[chunk_indices]
+                future = executor.submit(process_chunk, chunk_df)
+                future_to_chunk[future] = chunk_indices
+
+            # Process results as they complete
+            for future in tqdm(as_completed(future_to_chunk), total=len(future_to_chunk), desc="Processing chunks"):
+                chunk_indices = future_to_chunk[future]
+                try:
+                    chunk_results = future.result()
+                    for col in columns_to_process:
+                        results_dict[col].update(chunk_results[col])
+                except Exception as e:
+                    print(f"Error processing chunk: {str(e)}")
+
+        # Update final results
+        for col in columns_to_process:
+            for idx, result_tuple in results_dict[col].items():
+                if result_tuple:
+                    combined_data.loc[idx, result_columns[col]] = result_tuple
+
+        print("Processing completed")
+        print(f"Total rows processed: {len(results_dict[columns_to_process[0]])}")
+
+        # Print sample results
+        for col in columns_to_process:
+            print(f"\nResults for {col}:")
+            print(combined_data[[col] + result_columns[col]].head())
+
+        # Save final results
+        output_path = "abfss://opsdashboards@blackbirdproddatastore.dfs.core.windows.net/VOC/pitch26/CSAT/csat_emotions_predictions_final.csv"
+        combined_data.to_csv(output_path, index=False, storage_options={"sas_token": decoded_sas_token})
 
     except Exception as e:
         print(f"Error in main execution: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    main()
