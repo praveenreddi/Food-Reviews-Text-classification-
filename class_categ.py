@@ -59,16 +59,31 @@ def classify_comment_rationale(user_comment):
 
 
 
-pattern = r'"([^"]+)"\s*:\s*"([^"]*)"'
+if start_idx != -1 and end_idx > 0:
+    response_text = response_text[start_idx:end_idx]
+    # First clean newlines and backslashes
+    response_text = response_text.replace('\n', ' ')
+    response_text = response_text.replace('\\', '')
+
+    # Split into key-value pairs using a more lenient pattern
+    pattern = r'"([^"]+)"\s*:\s*"([^"}]*)'
     matches = re.findall(pattern, response_text)
 
-    # Rebuild the JSON with escaped quotes in values
+    # Rebuild the JSON properly
     cleaned_json = "{"
-    for key, value in matches:
-        # Escape any quotes within the value
-        value = value.replace('"', '\\"')
-        cleaned_json += f'"{key}":"{value}",'
+    for i, (key, value) in enumerate(matches):
+        # Clean the key and value
+        key = key.strip()
+        value = value.strip()
 
-    # Remove trailing comma and close the JSON
-    cleaned_json = cleaned_json.rstrip(',') + "}"
-    response_text = cleaned_json Debug print
+        # Add the cleaned key-value pair
+        cleaned_json += f'"{key}":"{value}"'
+
+        # Add comma if not the last pair
+        if i < len(matches) - 1:
+            cleaned_json += ","
+
+    cleaned_json += "}"
+    response_text = cleaned_json
+
+    print(f"Cleaned response: {response_text}")  # Debug print
