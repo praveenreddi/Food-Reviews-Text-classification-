@@ -51,3 +51,25 @@ def classify_comment_rationale(user_comment):
     except Exception as e:
         print(f"Error in classification: {str(e)}")
         return ("Error", "Error", "Error", 0)
+
+
+
+
+
+
+
+
+if start_idx != -1 and end_idx > 0:
+    response_text = response_text[start_idx:end_idx]
+    # Enhanced cleaning for string literals
+    response_text = response_text.replace('\\"', '"')     # Fix escaped quotes
+    response_text = response_text.replace("'", '"')       # Replace single quotes
+    response_text = response_text.replace('\n', '')       # Remove newlines
+    response_text = response_text.replace('"""', '"')     # Fix triple quotes
+    response_text = response_text.replace('""', '"')      # Fix double quotes
+
+    # Ensure quotes are properly terminated
+    if response_text.count('"') % 2 != 0:
+        response_text = response_text.replace('"', "'")   # Fall back to single quotes if unmatched
+
+    print(f"Cleaned response: {response_text}")  # Debug print
