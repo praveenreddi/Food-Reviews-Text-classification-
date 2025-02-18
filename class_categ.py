@@ -59,17 +59,16 @@ def classify_comment_rationale(user_comment):
 
 
 
-if start_idx != -1 and end_idx > 0:
-    response_text = response_text[start_idx:end_idx]
-    # Enhanced cleaning for string literals
-    response_text = response_text.replace('\\"', '"')     # Fix escaped quotes
-    response_text = response_text.replace("'", '"')       # Replace single quotes
-    response_text = response_text.replace('\n', '')       # Remove newlines
-    response_text = response_text.replace('"""', '"')     # Fix triple quotes
-    response_text = response_text.replace('""', '"')      # Fix double quotes
+pattern = r'"([^"]+)"\s*:\s*"([^"]*)"'
+    matches = re.findall(pattern, response_text)
 
-    # Ensure quotes are properly terminated
-    if response_text.count('"') % 2 != 0:
-        response_text = response_text.replace('"', "'")   # Fall back to single quotes if unmatched
+    # Rebuild the JSON with escaped quotes in values
+    cleaned_json = "{"
+    for key, value in matches:
+        # Escape any quotes within the value
+        value = value.replace('"', '\\"')
+        cleaned_json += f'"{key}":"{value}",'
 
-    print(f"Cleaned response: {response_text}")  # Debug print
+    # Remove trailing comma and close the JSON
+    cleaned_json = cleaned_json.rstrip(',') + "}"
+    response_text = cleaned_json Debug print
