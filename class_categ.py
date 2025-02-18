@@ -5,74 +5,47 @@ def classify_comment_rationale(user_comment):
         response_text = llm_call(messages)
         if not response_text:
             return ("Error", "Error", "Error", 0)
-        
-        # Debug print to see raw response
-        print(f"Raw response: {response_text}")
-        
+
+        print(f"Original response: {response_text}")  # Debug print
+
         try:
-            # First clean the response text
+            # Clean the response text
             response_text = response_text.strip()
-            
-            # If response is wrapped in quotes, remove them
-            if response_text.startswith('"') and response_text.endswith('"'):
-                response_text = response_text[1:-1]
-            
-            # Find the dictionary-like structure
+
+            # Extract the dictionary part
             start_idx = response_text.find('{')
             end_idx = response_text.rfind('}') + 1
-            
+
             if start_idx != -1 and end_idx > 0:
                 response_text = response_text[start_idx:end_idx]
-                
-                # Replace problematic characters
-                response_text = (response_text
-                    .replace("'", '"')
-                    .replace('\n', '')
-                    .replace('\\', '')
-                    .replace('} {', '}, {')
-                    .replace('""', '"')
-                )
-                
-                # Fix common JSON formatting issues
-                response_text = re.sub(r'(["}])([A-Za-z])', r'\1, \2', response_text)
-                response_text = re.sub(r'([^,{])\s*"', r'\1, "', response_text)
-                
+                # Basic cleaning
+                response_text = response_text.replace("'", '"')
+                response_text = response_text.replace('\n', '')
+
                 print(f"Cleaned response: {response_text}")  # Debug print
-                
+
+                # Try parsing as JSON first
                 try:
                     response_json = json.loads(response_text)
                 except:
-                    # If JSON parsing fails, try ast.literal_eval
+                    # If JSON fails, try ast.literal_eval
                     response_dict = ast.literal_eval(response_text)
-                    response_json = json.loads(json.dumps(response_dict))
+                    if isinstance(response_dict, dict):
+                        response_json = response_dict
+                    else:
+                        return ("Error", "Error", "Error", 0)
             else:
-                print("No JSON structure found in response")
-                return ("Error", "Error", "Error", 0)
-                
-        except Exception as e:
-            print(f"JSON parsing error: {str(e)}")
-            print(f"Problematic response: {response_text}")
-            
-            # Last resort: try to extract values using regex
-            try:
-                en_text = re.search(r'"EN_text"\s*:\s*"([^"]*)"', response_text)
-                lang_code = re.search(r'"language_code"\s*:\s*"([^"]*)"', response_text)
-                pred_label = re.search(r'"predicted_label"\s*:\s*"([^"]*)"', response_text)
-                conf_score = re.search(r'"confidence_score"\s*:\s*([\d.]+)', response_text)
-                
-                return (
-                    en_text.group(1) if en_text else "Error",
-                    lang_code.group(1) if lang_code else "Error",
-                    pred_label.group(1) if pred_label else "Error",
-                    float(conf_score.group(1)) if conf_score else 0
-                )
-            except:
                 return ("Error", "Error", "Error", 0)
 
+        except Exception as e:
+            print(f"Parsing error: {str(e)}")
+            print(f"Problematic response: {response_text}")
+            return ("Error", "Error", "Error", 0)
+
         return (
-            response_json.get("EN_text", ""),
-            response_json.get("language_code", ""),
-            response_json.get("predicted_label", "unknown/vague"),
+            str(response_json.get("EN_text", "")),
+            str(response_json.get("language_code", "")),
+            str(response_json.get("predicted_label", "unknown/vague")),
             float(response_json.get("confidence_score", 0.5))
         )
     except Exception as e:
