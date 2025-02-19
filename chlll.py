@@ -91,3 +91,124 @@ try:
 
 except Exception as e:
     print(f"Error: {e}")
+
+
+
+import pandas as pd
+import json
+import ast
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import base64
+
+# Reading the data
+csv_path = "abfss://opsdashboards@blackbirdproddatastore.dfs.core.window/-net/VOC/OL_data/OL_results/services/VOCOpinionLabData_services_monthResults.xlsx"
+services_data = pd.read_excel(csv_path, storage_options={"sas_token": base64.b64decode(sas_token).decode()})
+
+# Data preprocessing
+services_data['Submission Date'] = pd.to_datetime(services_data['Submission Date'])
+latest_date = pd.Timestamp('2025-01-26 00:00:00')
+services_data = services_data[services_data["Submission Date"] > latest_date]
+
+valid_data = services_data[~services_data["Comments"].isna()]
+valid_comments = valid_data["Comments"]
+comments_indices = valid_comments.index.to_list()
+
+# Chunking with unique indices
+chunk_size = 100
+chunks = [comments_indices[i:i + chunk_size] for i in range(0, len(comments_indices), chunk_size)]
+
+def get_system_message():
+    # Your existing get_system_message implementation
+    pass
+
+def get_prompt_message(system_message, test_query):
+    # Your existing get_prompt_message implementation
+    pass
+
+def classify_single_comment(text, idx):
+    """Process a single comment and handle errors individually"""
+    if pd.isna(text) or not isinstance(text, str) or not text.strip():
+        return idx, ("Error - Empty Text", "Error", "Error", 0)
+    
+    try:
+        system_message = get_system_message()
+        messages = get_prompt_message(system_message, str(text))
+        
+        response_text = llm_call(messages)
+        if not response_text:
+            return idx, ("Error - No Response", "Error", "Error", 0)
+
+        # Clean and parse response
+        response_text = response_text.strip()
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}') + 1
+        
+        if start_idx != -1 and end_idx > 0:
+            response_text = response_text[start_idx:end_idx]
+            response_text = response_text.replace('"', '"').replace("'", "'")
+            
+            try:
+                response_json = json.loads(response_text)
+            except:
+                try:
+                    response_dict = ast.literal_eval(response_text)
+                    response_json = response_dict if isinstance(response_dict, dict) else {}
+                except:
+                    return idx, ("Error - Parse Failed", "Error", "Error", 0)
+            
+            return idx, (
+                str(response_json.get("EN_text", "")),
+                str(response_json.get("language_code", "")),
+                str(response_json.get("predicted_label", "unknown/vague")),
+                float(response_json.get("confidence_score", 0.5))
+            )
+        
+        return idx, ("Error - Invalid JSON", "Error", "Error", 0)
+    
+    except Exception as e:
+        return idx, (f"Error - {str(e)}", "Error", "Error", 0)
+
+def process_chunk(chunk_indices, valid_comments):
+    """Process a chunk of comments with individual error handling"""
+    chunk_results = {}
+    for idx in chunk_indices:
+        text = valid_comments.loc[idx]
+        _, result = classify_single_comment(text, idx)
+        chunk_results[idx] = result
+    return chunk_results
+
+# Main processing
+results_dict = {}
+processed_indices = set()
+
+with ThreadPoolExecutor(max_workers=10) as executor:
+    future_to_chunk = {
+        executor.submit(process_chunk, chunk, valid_comments): chunk 
+        for chunk in chunks
+    }
+    
+    for future in tqdm(as_completed(future_to_chunk), total=len(future_to_chunk), desc="Processing chunks"):
+        chunk_indices = future_to_chunk[future]
+        try:
+            chunk_results = future.result()
+            # Only update with new results
+            for idx, result in chunk_results.items():
+                if idx not in processed_indices:
+                    results_dict[idx] = result
+                    processed_indices.add(idx)
+        except Exception as e:
+            print(f"Error processing chunk: {str(e)}")
+
+# Update the dataframe with results
+result_columns = ["translated_text", "language_code", "predicted_label", "confidence_score"]
+for idx, result_tuple in results_dict.items():
+    valid_data.loc[idx, result_columns] = result_tuple
+
+# Save results
+output_path = "abfss://opsdashboards@blackbirdproddatastore.dfs.core.windows.net/VOC/pitch26/CSAT/sp-en-transit.csv"
+valid_data.to_csv(output_path, index=False, storage_options={"sas_token": base64.b64decode(sas_token).decode()})
+print("Output saved to: ", output_path)
+print(f"Total processed records: {len(results_dict)}")
+print(f"Total input records: {len(valid_comments)}")
+
