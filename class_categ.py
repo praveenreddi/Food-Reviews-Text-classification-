@@ -191,4 +191,108 @@ def classify_single_comment(text, idx):
 import openai
 openai.api_key = 'your-api-key'  # Replace with your API key
 
+
+def classify_single_comment(text, idx):
+    if pd.isna(text) or not isinstance(text, str) or not text.strip():
+        return idx, ("Error - Empty Text", "Error", "Error", 0)
+    
+    try:
+        system_message = get_system_message()
+        messages = get_prompt_message(system_message, str(text))
+        response_text = llm_call(messages)
+        
+        if not response_text:
+            return idx, ("Error - No Response", "Error", "Error", 0)
+        
+        if model_name == "openai":
+            try:
+                # Parse the outer JSON structure
+                outer_response = json.loads(response_text.strip())
+                
+                # Get the content from the message
+                content = outer_response['modelResult']['choices'][0]['message']['content']
+                
+                # Parse the content which contains our actual classification
+                try:
+                    # Clean up the content string
+                    content = content.strip()
+                    content = content.replace("\\n", "").replace("\\", "")
+                    
+                    # Parse the cleaned content
+                    response_json = json.loads(content)
+                except:
+                    # If JSON parsing fails, try using string manipulation
+                    try:
+                        # Extract values using string manipulation
+                        language_code = content.split("'language_code': '")[1].split("'")[0]
+                        en_text = content.split("'EN_text': '")[1].split("'")[0]
+                        predicted_label = content.split("'predicted_label': '")[1].split("'")[0]
+                        confidence_score = float(content.split("'confidence_score': ")[1].split("}")[0])
+                        
+                        return idx, (
+                            en_text,
+                            language_code,
+                            predicted_label,
+                            confidence_score
+                        )
+                    except Exception as e:
+                        print(f"String parsing failed: {str(e)}")
+                        return idx, ("Error - Parse Failed", "Error", "Error", 0)
+                
+                return idx, (
+                    str(response_json.get("EN_text", "")),
+                    str(response_json.get("language_code", "")),
+                    str(response_json.get("predicted_label", "unknown/vague")),
+                    float(response_json.get("confidence_score", 0.5))
+                )
+                
+            except Exception as e:
+                print(f"OpenAI parsing error: {str(e)}")
+                return idx, ("Error - Parse Failed", "Error", "Error", 0)
+        
+        elif model_name == "llama":
+            # Existing llama model handling code
+            response_text = response_text.strip()
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}') + 1
+            
+            if start_idx != -1 and end_idx > 0:
+                response_text = response_text[start_idx:end_idx]
+                response_text = response_text.replace('"', '"').replace("'", "'")
+                
+                try:
+                    response_json = json.loads(response_text)
+                except:
+                    try:
+                        response_dict = ast.literal_eval(response_text)
+                        response_json = response_dict if isinstance(response_dict, dict) else {}
+                    except:
+                        return idx, ("Error - Parse Failed", "Error", "Error", 0)
+                
+                return idx, (
+                    str(response_json.get("EN_text", "")),
+                    str(response_json.get("language_code", "")),
+                    str(response_json.get("predicted_label", "unknown/vague")),
+                    float(response_json.get("confidence_score", 0.5))
+                )
+        
+        return idx, ("Error - Invalid JSON", "Error", "Error", 0)
+        
+    except Exception as e:
+        print(f"General error: {str(e)}")
+        return idx, (f"Error - {str(e)}", "Error", "Error", 0)
+
+# Test the function
+test_comment = "I can't login"
+res = classify_single_comment(test_comment, 12)
+print("\nProcessed Result:")
+print(f"Index: {res[0]}")
+print(f"English Text: {res[1][0]}")
+print(f"Language Code: {res[1][1]}")
+print(f"Predicted Label: {res[1][2]}")
+print(f"Confidence Score: {res[1][3]}")
+
+
+
+
 # The rest of your code remains the same
