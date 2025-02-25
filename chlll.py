@@ -212,3 +212,85 @@ print("Output saved to: ", output_path)
 print(f"Total processed records: {len(results_dict)}")
 print(f"Total input records: {len(valid_comments)}")
 
+
+
+
+
+
+def classify_single_comment(text, idx):
+    if pd.isna(text) or not isinstance(text, str) or not text.strip():
+        return idx, ("Error - Empty Text", "Error", "Error", 0)
+
+    try:
+        system_message = get_system_message()
+        messages = get_prompt_message(system_message, str(text))
+        response_text = llm._call(messages)
+
+        if not response_text:
+            return idx, ("Error - No Response", "Error", "Error", 0)
+
+        # Clean and standardize the response text
+        response_text = response_text.strip()
+
+        if model_name == "openai":
+            try:
+                # First try to parse the OpenAI specific structure
+                response_text = json.loads(response_text)['modelResult']['choices'][0]['message']['content']
+            except:
+                # If that fails, try to use the raw response
+                pass
+
+        # Clean up common JSON formatting issues
+        response_text = (response_text
+            .replace("'", '"')
+            .replace("\\", "")
+            .replace("\n", " ")
+            .strip())
+
+        # Try multiple parsing approaches
+        response_json = None
+
+        # Attempt 1: Direct JSON parsing
+        try:
+            response_json = json.loads(response_text)
+        except:
+            # Attempt 2: Find JSON-like structure within text
+            try:
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}') + 1
+                if start_idx != -1 and end_idx > 0:
+                    json_str = response_text[start_idx:end_idx]
+                    response_json = json.loads(json_str)
+            except:
+                # Attempt 3: ast.literal_eval as last resort
+                try:
+                    response_dict = ast.literal_eval(response_text)
+                    if isinstance(response_dict, dict):
+                        response_json = response_dict
+                except:
+                    print(f"Failed to parse response for idx {idx}: {response_text}")
+                    return idx, ("Error - Parse Failed", "Error", "Error", 0)
+
+        if not response_json:
+            return idx, ("Error - Invalid JSON", "Error", "Error", 0)
+
+        # Extract values with proper error handling
+        en_text = str(response_json.get("EN_text", ""))
+        language_code = str(response_json.get("language_code", ""))
+        predicted_label = str(response_json.get("predicted_label", "unknown/vague"))
+        confidence_score = float(response_json.get("confidence_score", 0.5))
+
+        return idx, (en_text, language_code, predicted_label, confidence_score)
+
+    except Exception as e:
+        print(f"Exception at classify_single_comment for idx {idx}: {str(e)}\nText: {text[:100]}...")
+        return idx, (f"Error - {str(e)}", "Error", "Error", 0)
+
+def process_chunk(chunk_indices, valid_comments):
+    chunk_results = {}
+    for idx in chunk_indices:
+        text = valid_comments.loc[idx]
+        result = classify_single_comment(text, idx)
+        chunk_results[idx] = result
+    return chunk_results
+
