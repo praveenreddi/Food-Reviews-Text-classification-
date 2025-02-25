@@ -369,3 +369,68 @@ except json.JSONDecodeError as e:
     print(f"Error parsing JSON: {str(e)}")
 
 
+def classify_single_comment(text, idx):
+    if pd.isna(text) or not isinstance(text, str) or not text.strip():
+        return idx, ("Error - Empty Text", "Error", "Error", 0)
+    
+    try:
+        system_message = get_system_message()
+        messages = get_prompt_message(system_message, str(text))
+        response_text = llm._call(messages)
+
+        if not response_text:
+            return idx, ("Error - No Response", "Error", "Error", 0)
+
+        # Clean and standardize the response text
+        response_text = response_text.strip()
+        
+        try:
+            # First parse the outer OpenAI response structure
+            outer_response = json.loads(response_text)
+            
+            # Extract the actual content from the nested structure
+            content = outer_response.get('modelResult', {}).get('choices', [])[0].get('message', {}).get('content', '')
+            
+            # Clean the content
+            content = (content
+                .replace('\n', '')
+                .replace('\\n', '')
+                .strip())
+            
+            # Remove any extra parentheses at the start and end
+            if content.startswith('('):
+                content = content[1:]
+            if content.endswith(')'):
+                content = content[:-1]
+            
+            # Parse the actual JSON content
+            response_json = json.loads(content)
+            
+            # Extract values
+            en_text = str(response_json.get("EN_text", ""))
+            language_code = str(response_json.get("language_code", ""))
+            predicted_label = str(response_json.get("predicted_label", "unknown/vague"))
+            confidence_score = float(response_json.get("confidence_score", 0.85))
+
+            return idx, (en_text, language_code, predicted_label, confidence_score)
+
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {str(e)}")
+            print(f"Content attempting to parse: {content}")
+            return idx, ("Error - JSON Parse Failed", "Error", "Error", 0)
+        except Exception as e:
+            print(f"Error processing response: {str(e)}")
+            print(f"Response text: {response_text[:200]}")
+            return idx, ("Error - Processing Failed", "Error", "Error", 0)
+
+    except Exception as e:
+        print(f"General exception: {str(e)}")
+        return idx, (f"Error - {str(e)}", "Error", "Error", 0)
+
+
+test_text = """None of the broadband facts ill load and it took too many clicks to get what I wanted. I had to click on see/change plan twice to finally get to see the plans and then when I got here, I couldn't even look because the broadband facts would not load."""
+
+res = classify_single_comment(test_text, 12)
+print(f"Final result: {res}")
+
+
