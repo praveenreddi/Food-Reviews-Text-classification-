@@ -294,3 +294,78 @@ def process_chunk(chunk_indices, valid_comments):
         chunk_results[idx] = result
     return chunk_results
 
+def classify_single_comment(text, idx):
+    if pd.isna(text) or not isinstance(text, str) or not text.strip():
+        return idx, ("Error - Empty Text", "Error", "Error", 0)
+    
+    try:
+        system_message = get_system_message()
+        messages = get_prompt_message(system_message, str(text))
+        response_text = llm._call(messages)
+
+        print(f"Raw response text: {response_text}")  # Debug print
+
+        if not response_text:
+            return idx, ("Error - No Response", "Error", "Error", 0)
+
+        # Clean and standardize the response text
+        response_text = response_text.strip()
+        
+        # Clean up common JSON formatting issues
+        response_text = (response_text
+            .replace("'", '"')
+            .replace("\\", "")
+            .replace("\n", " ")
+            .strip())
+
+        print(f"Cleaned response text: {response_text}")  # Debug print
+
+        try:
+            response_json = json.loads(response_text)
+            print("Successfully parsed JSON!")  # Debug print
+            print(f"Parsed JSON: {response_json}")  # Debug print
+            
+            # Extract values with proper error handling
+            en_text = str(response_json.get("EN_text", ""))
+            language_code = str(response_json.get("language_code", ""))
+            predicted_label = str(response_json.get("predicted_label", "unknown/vague"))
+            confidence_score = float(response_json.get("confidence_score", 0.5))
+
+            return idx, (en_text, language_code, predicted_label, confidence_score)
+
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {str(e)}")  # Debug print
+            print(f"Error position: {e.pos}")  # Debug print
+            print(f"Error line and column: {e.lineno}, {e.colno}")  # Debug print
+            
+            # Let's print the problematic character
+            if hasattr(e, 'pos'):
+                print(f"Character at error position: {response_text[e.pos]}")
+                print(f"Context around error: {response_text[max(0, e.pos-10):min(len(response_text), e.pos+10)]}")
+
+    except Exception as e:
+        print(f"General exception: {str(e)}")  # Debug print
+        return idx, (f"Error - {str(e)}", "Error", "Error", 0)
+
+# Test the function
+test_text = """None of the broadband facts ill load and it took too many clicks to get what I wanted. I had to click on see/change plan twice to finally get to see the plans and then when I got here, I couldn't even look because the broadband facts would not load."""
+
+res = classify_single_comment(test_text, 12)
+print(f"Final result: {res}")
+
+
+import json
+
+test_json = '''{
+"EN_text": "None of the broadband facts will load and it took too many clicks to get what I wanted. I had to click on see/change plan twice to finally get to see the plans and then when I got here, I couldn't even look because the broadband facts would not load.",
+"language_code": "english",
+"predicted_label": "navigation_issues",
+"confidence_score": 0.85 }'''
+
+try:
+    parsed = json.loads(test_json)
+    print("JSON parsed successfully:", parsed)
+except json.JSONDecodeError as e:
+    print(f"Error parsing JSON: {str(e)}")
+
+
