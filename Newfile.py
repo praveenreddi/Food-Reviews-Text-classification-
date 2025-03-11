@@ -138,3 +138,66 @@ labels = [
 ]
 
 
+
+
+
+import pandas as pd
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+
+# 1. Load your Excel data
+df = pd.read_excel("Cancelled CDEX.xlsx")
+
+# 2. Create embeddings and vector store
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+
+# Create document list for vector store
+documents = []
+for idx, row in df.iterrows():
+    content = f"Summary: {row['Summary']}\nIssue key: {row['Key']}"
+    documents.append({"page_content": content, "metadata": {"source": "customer_complaints"}})
+
+# Create vector store
+vector_store = FAISS.from_documents(documents, embeddings)
+retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+
+# 3. Define classification function
+def classify_summary(summary):
+    # Prepare query
+    query = {"Summary": summary}
+
+    # Retrieve similar documents
+    docs = retriever.get_relevant_documents(str(query))
+
+    # Extract summaries from retrieved documents
+    summaries = []
+    for doc in docs:
+        if "Summary:" in doc.page_content:
+            summary_text = doc.page_content.split("Summary:")[1].split("\n")[0].strip()
+            summaries.append(summary_text)
+
+    # Return most frequent summary as the predicted label
+    if summaries:
+        return max(set(summaries), key=summaries.count)
+    else:
+        return "unknown"
+
+# 4. Process all summaries from the dataset
+all_summaries = df['Summary'].tolist()
+results = []
+
+for summary in all_summaries:
+    predicted_label = classify_summary(summary)
+    results.append({
+        "original_summary": summary,
+        "predicted_label": predicted_label
+    })
+
+# 5. Create results DataFrame
+results_df = pd.DataFrame(results)
+print(results_df)
+
+# 6. Export to Excel
+results_df.to_excel("all_summaries_classification.xlsx", index=False)
+
+
