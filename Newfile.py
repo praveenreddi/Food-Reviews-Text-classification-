@@ -201,3 +201,31 @@ print(results_df)
 results_df.to_excel("all_summaries_classification.xlsx", index=False)
 
 
+
+
+
+import pandas as pd
+
+# Load your Excel file
+df = pd.read_excel('your_excel_file.xlsx')
+
+# Filter for profile_related and registration_related comments
+profile_comments = df[df['prediction_theme_label'] == 'profile_related']['comments'].tolist()
+registration_comments = df[df['prediction_theme_label'] == 'registration_related']['comments'].tolist()
+
+# Combine the relevant comments
+relevant_comments = profile_comments + registration_comments
+
+# Format the comments for the prompt
+formatted_comments = "\n".join([f"- {comment}" for comment in relevant_comments])
+
+# Create the prompt for Llama 3
+llama_prompt = f"""
+Analyze the following customer comments that have been labeled as profile_related or registration_related. Create a concise summary of the key issues under the heading "Registration & Login". Focus on specific problems users are experiencing, error messages, redirects, and process failures. Format the summary as a paragraph with clear, direct language.
+
+Comments to analyze:
+{formatted_comments}
+"""
+
+print(llama_prompt)
+# You would then send this prompt to your Llama 3 API
