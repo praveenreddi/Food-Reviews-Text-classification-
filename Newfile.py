@@ -229,3 +229,47 @@ Comments to analyze:
 
 print(llama_prompt)
 # You would then send this prompt to your Llama 3 API
+
+
+def get_system_message(formatted_comments):
+    system_message = f"""
+Analyze the following customer comments that have been labeled as profile_related or registration_related. Create a concise summary of the key issues under
+the heading "Registration & Login". Focus on specific problems users are experiencing, error messages, redirects, and process failures. Format the summary as
+a paragraph that MUST start with "Customers are facing..." and use clear, direct language.
+
+Comments to analyze:
+{formatted_comments}
+"""
+    return system_message
+
+# Filter for profile_related and registration_related comments
+profile_comments = df[df['prediction_theme_label'] == 'profile_related']['comments'].tolist()
+registration_comments = df[df['prediction_theme_label'] == 'registration_related']['comments'].tolist()
+
+# Combine the relevant comments
+relevant_comments = profile_comments + registration_comments
+
+# Format the comments for the prompt
+formatted_comments = "\n".join([f"- {comment}" for comment in relevant_comments])
+
+# Get the system message with formatted comments
+system_message = get_system_message(formatted_comments)
+
+# Prepare messages for LLM
+messages = [
+    {'role': 'system', 'content': system_message}
+]
+
+# Call the LLM
+completion = llm.call(messages)
+response = completion.choices[0].message.content
+
+# If the response is in JSON format, extract the predicted label
+try:
+    response = json.loads(response)['predicted_label']
+except:
+    # If not in JSON format, use the response as is
+    pass
+
+print(response)
+
