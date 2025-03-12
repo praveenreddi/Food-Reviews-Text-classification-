@@ -273,3 +273,73 @@ except:
 
 print(response)
 
+def get_system_message(formatted_comments):
+    system_message = f"""
+Analyze the following customer comments that have been labeled as profile_related or registration_related. Create a concise summary of the key issues under
+the heading "Registration & Login". Focus on specific problems users are experiencing, error messages, redirects, and process failures. Format the summary as
+a paragraph that MUST start with "Customers are facing..." and use clear, direct language.
+
+Comments to analyze:
+{formatted_comments}
+
+IMPORTANT: Your summary must ONLY include information related to registration, login, profile management, and account access. Do NOT include any information about payments, orders, shipping, product quality, or other unrelated topics.
+"""
+    return system_message
+
+# Filter for profile_related and registration_related comments
+profile_comments = df[df['prediction_theme_label'] == 'profile_related']['comments'].tolist()
+registration_comments = df[df['prediction_theme_label'] == 'registration_related']['comments'].tolist()
+
+# Combine the relevant comments
+relevant_comments = profile_comments + registration_comments
+
+# Format the comments for the prompt
+formatted_comments = "\n".join([f"- {comment}" for comment in relevant_comments])
+
+# Get the system message with formatted comments
+system_message = get_system_message(formatted_comments)
+
+# Prepare messages for LLM
+messages = [
+    {'role': 'system', 'content': system_message}
+]
+
+# Call the LLM
+completion = llm.call(messages)
+response = completion.choices[0].message.content
+
+# If the response is in JSON format, extract the predicted label
+try:
+    response = json.loads(response)['predicted_label']
+except:
+    # If not in JSON format, use the response as is
+    pass
+
+# Verification step to ensure only registration and login related content
+def verify_response(response):
+    verification_prompt = f"""
+    Review this summary and verify it ONLY contains information related to registration, login, profile management, and account access issues.
+    Remove any content about payments, orders, shipping, product quality, or other unrelated topics.
+    Ensure the summary starts with "Customers are facing..." and maintains a clear, concise format.
+    
+    Summary to verify:
+    {response}
+    
+    Return ONLY the verified and corrected summary.
+    """
+    
+    verification_messages = [
+        {'role': 'system', 'content': verification_prompt}
+    ]
+    
+    verification_completion = llm.call(verification_messages)
+    verified_response = verification_completion.choices[0].message.content
+    
+    # Clean up any formatting or quotes that might be added
+    verified_response = verified_response.strip('"\'')
+    
+    return verified_response
+
+# Apply verification
+final_response = verify_response(response)
+print(final_response)
