@@ -1,0 +1,131 @@
+def get_system_message(formatted_comments):
+    system_message = f"""
+    Analyze the following customer comments related to web sales. Create a concise summary of the key issues
+    customers are experiencing with the website, online purchasing, checkout process, and other web sales aspects.
+    Format the summary as paragraphs that start with "Customers are facing..." and use clear, direct language.
+
+    Comments to analyze:
+    {formatted_comments}
+    """
+    return system_message
+
+def get_final_summary_message(batch_summaries):
+    system_message = f"""
+    Combine these web sales issue summaries into one concise, comprehensive summary.
+    Focus specifically on problems customers encounter during online shopping, website navigation,
+    checkout process, and other web sales experiences.
+    Format the final summary as paragraphs that start with "Customers are facing..."
+    and use clear, direct language.
+
+    Summaries to combine:
+    {batch_summaries}
+    """
+    return system_message
+
+def filter_and_truncate_comments(comments, min_words=2, max_words=50):
+    filtered_comments = []
+
+    for comment in comments:
+        if not comment or not isinstance(comment, str):
+            continue
+
+        # Count words
+        word_count = len(comment.split())
+
+        # Skip if too short
+        if word_count < min_words:
+            continue
+
+        # Truncate if too long
+        if word_count > max_words:
+            words = comment.split()
+            comment = ' '.join(words[:max_words]) + "..."
+
+        filtered_comments.append(comment)
+
+    return filtered_comments
+
+def process_comments_in_two_batches(comments, char_limit=3000):
+    # Split all comments into exactly two batches
+    mid_point = len(comments) // 2
+    batch1 = comments[:mid_point]
+    batch2 = comments[mid_point:]
+
+    all_responses = []
+
+    # Process each batch
+    for i, batch in enumerate([batch1, batch2]):
+        batch_num = i + 1
+        formatted_batch = "\n".join([f"- {comment}" for comment in batch])
+
+        # Truncate if too long
+        if len(formatted_batch) > char_limit:
+            formatted_batch = formatted_batch[:char_limit] + "... [truncated]"
+
+        print(f"Processing batch {batch_num}/2, length: {len(formatted_batch)} chars")
+
+        system_message = get_system_message(formatted_batch)
+        messages = [{'role': 'system', 'content': system_message}]
+
+        try:
+            print(f"Calling LLM for batch {batch_num}...")
+            completion = llm_call(messages)
+
+            if completion is not None and hasattr(completion, 'choices') and len(completion.choices) > 0:
+                response = completion.choices[0].message.content
+                response = response.strip('\"\'')
+                all_responses.append(response)
+                print(f"Successfully processed batch {batch_num}")
+            else:
+                error_msg = f"Failed to process batch {batch_num}: LLM returned invalid response"
+                all_responses.append(error_msg)
+                print(error_msg)
+        except Exception as e:
+            error_msg = f"Error in batch {batch_num}: {str(e)}"
+            all_responses.append(error_msg)
+            print(error_msg)
+
+    # Combine the two batch summaries into one final summary
+    if len(all_responses) == 2:
+        batch_summaries = "\n\n".join(all_responses)
+
+        final_summary_message = get_final_summary_message(batch_summaries)
+        final_messages = [{'role': 'system', 'content': final_summary_message}]
+
+        try:
+            print("Creating final combined summary...")
+            final_completion = llm_call(final_messages)
+
+            if final_completion is not None and hasattr(final_completion, 'choices') and len(final_completion.choices) > 0:
+                final_response = final_completion.choices[0].message.content
+                final_response = final_response.strip('\"\'')
+                print("Successfully created final summary")
+                return final_response
+            else:
+                return "Failed to create final summary: LLM returned invalid response"
+        except Exception as e:
+            return f"Error creating final summary: {str(e)}"
+    else:
+        return "\n\n".join(all_responses)
+
+# Main execution
+try:
+    # Get all comments from dataframe
+    all_comments = df['Comments'].tolist()
+
+    # Filter and truncate comments
+    filtered_comments = filter_and_truncate_comments(all_comments, min_words=2, max_words=50)
+
+    print(f"Total comments: {len(all_comments)}")
+    print(f"Filtered comments (2-50 words): {len(filtered_comments)}")
+
+    # Process comments in exactly two batches and create final summary
+    final_summary = process_comments_in_two_batches(filtered_comments, char_limit=3000)
+
+    # Print the final summarized response
+    print("\n\nFINAL SUMMARY OF WEB SALES CUSTOMER ISSUES:")
+    print("============================================")
+    print(final_summary)
+
+except Exception as e:
+    print(f"An error occurred in the main execution: {str(e)}")
