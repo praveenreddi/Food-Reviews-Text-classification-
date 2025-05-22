@@ -2,9 +2,16 @@ import os
 import json
 import requests
 from typing import Dict, List, Any, Optional
-import autogen
 from langchain.llms.base import LLM
 from langchain.callbacks.manager import CallbackManagerForLLMRun
+
+# Install required packages if needed
+try:
+    import autogen
+except ImportError:
+    import subprocess
+    subprocess.check_call(["pip", "install", "pyautogen"])
+    import autogen
 
 class LlamaLLM(LLM):
     llm_model: str
@@ -78,67 +85,75 @@ def call_openai(messages, llm_url, access_token, model, temperature=0, max_token
     else:
         raise Exception(f"API call failed with status code {response.status_code}: {response.text}")
 
-class CustomCallbackHandler:
-    def on_llm_start(self, serialized, prompts, **kwargs):
-        print(f"LLM started with prompts: {prompts}")
+# Create a custom endpoint class that will be used by AutoGen
+class CustomEndpoint:
+    def __init__(self):
+        self.llm = LlamaLLM(llm_model="openai")  # Using openai for gpt-4-32k
 
-    def on_llm_end(self, response, **kwargs):
-        print(f"LLM ended with response: {response}")
+    def completion(self, messages, model=None, temperature=0, max_tokens=None, stream=False):
+        """Custom completion function that mimics OpenAI's API"""
+        if stream:
+            raise ValueError("Streaming is not supported with this custom endpoint")
 
-    def on_llm_error(self, error, **kwargs):
-        print(f"LLM error: {error}")
+        # Extract the conversation context
+        prompt = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            prompt += f"{role}: {content}\n"
 
-# Initialize your LLM instance
-llm_instance = LlamaLLM(llm_model="openai")  # Using openai for gpt-4-32k
+        # Get response from your LLM
+        response_text = self.llm._call(prompt)
 
-# Create a custom completion function for AutoGen
-def custom_completion(messages, model="gpt-4-32k", temperature=0, max_tokens=800):
-    # Format the conversation history for your LLM
-    # Extract the last user message
-    last_message = None
-    for msg in reversed(messages):
-        if msg["role"] == "user":
-            last_message = msg["content"]
-            break
+        # Return in the format expected by AutoGen
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": response_text,
+                        "role": "assistant"
+                    }
+                }
+            ]
+        }
 
-    if not last_message:
-        last_message = messages[-1]["content"]
+# Create a custom implementation of the OpenAI client
+class CustomOpenAI:
+    def __init__(self, api_key=None, base_url=None, **kwargs):
+        self.endpoint = CustomEndpoint()
 
-    # Call your existing _call method to get the response
-    response = llm_instance._call(last_message)
+    def chat(self):
+        return self.endpoint
 
-    # Return in the format AutoGen expects
-    return {"choices": [{"message": {"content": response, "role": "assistant"}}]}
+# Monkey patch AutoGen to use our custom OpenAI client
+import importlib
+import sys
 
-# Configure AutoGen with your custom completion function
+# Create a module for our custom OpenAI client
+custom_openai_module = type(sys)(name='custom_openai')
+custom_openai_module.Client = CustomOpenAI
+sys.modules['custom_openai'] = custom_openai_module
+
+# Patch AutoGen to use our custom module
+autogen.oai.openai = custom_openai_module
+
+# Set up the agents
 config_list = [
     {
-        "model": "gpt-4-32k",
-        "api_key": "not-needed"
+        "model": "gpt-4",
+        "api_key": "sk-dummy-key-for-custom-implementation"
     }
 ]
 
-# Create AutoGen agents with the custom completion function
+# Create AutoGen agents
 assistant = autogen.AssistantAgent(
     name="assistant",
     llm_config={
         "config_list": config_list,
-        "cache_seed": 42,
-        "temperature": 0,
-        "timeout": 120
+        "temperature": 0
     },
     system_message="You are a helpful AI assistant."
 )
-
-# Register the custom completion function
-autogen.ChatCompletion.register_provider(
-    model_type="gpt-4-32k",
-    provider="custom",
-    completion_constructor=custom_completion
-)
-
-# Set the provider for the assistant
-assistant.llm_config["provider"] = "custom"
 
 user_proxy = autogen.UserProxyAgent(
     name="user_proxy",
