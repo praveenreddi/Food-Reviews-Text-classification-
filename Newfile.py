@@ -88,48 +88,57 @@ class CustomCallbackHandler:
     def on_llm_error(self, error, **kwargs):
         print(f"LLM error: {error}")
 
-# Create an AutoGen-compatible wrapper for your LlamaLLM
-def create_llm_config(use_openai=True):
-    """Create AutoGen config using your custom LLM client"""
+# Initialize your LLM instance
+llm_instance = LlamaLLM(llm_model="openai")  # Using openai for gpt-4-32k
 
-    # Initialize your LLM instance
-    llm_instance = LlamaLLM(llm_model="openai" if use_openai else "llama")
+# Create a custom completion function for AutoGen
+def custom_completion(messages, model="gpt-4-32k", temperature=0, max_tokens=800):
+    # Format the conversation history for your LLM
+    # Extract the last user message
+    last_message = None
+    for msg in reversed(messages):
+        if msg["role"] == "user":
+            last_message = msg["content"]
+            break
 
-    # Define a function that will handle the API calls using your _call method
-    def custom_llm_call(messages: List[Dict], **kwargs):
-        # Format the conversation history for your LLM
-        # For simplicity, we'll just use the last message, but you might want to include more context
+    if not last_message:
         last_message = messages[-1]["content"]
 
-        # Call your existing _call method to get the response
-        response = llm_instance._call(last_message)
+    # Call your existing _call method to get the response
+    response = llm_instance._call(last_message)
 
-        # Return in the format AutoGen expects
-        return {"content": response}
+    # Return in the format AutoGen expects
+    return {"choices": [{"message": {"content": response, "role": "assistant"}}]}
 
-    # Create the config dictionary for AutoGen
-    config = {
-        "cache_seed": 42,  # For reproducibility
-        "temperature": 0,
-        "config_list": [{"model": "gpt-4-32k", "api_key": "not-needed"}],
-        "timeout": 120,
-        "custom_llm_provider": custom_llm_call
+# Configure AutoGen with your custom completion function
+config_list = [
+    {
+        "model": "gpt-4-32k",
+        "api_key": "not-needed"
     }
+]
 
-    return config
-
-# Set up environment variable for your API token
-# os.environ["ABACUS_API_TOKEN"] = "your-actual-token"  # Uncomment and set your token
-
-# Create AutoGen config with your custom LLM (using the "openai" option for gpt4-32k)
-llm_config = create_llm_config(use_openai=True)
-
-# Create AutoGen agents
+# Create AutoGen agents with the custom completion function
 assistant = autogen.AssistantAgent(
     name="assistant",
-    llm_config=llm_config,
+    llm_config={
+        "config_list": config_list,
+        "cache_seed": 42,
+        "temperature": 0,
+        "timeout": 120
+    },
     system_message="You are a helpful AI assistant."
 )
+
+# Register the custom completion function
+autogen.ChatCompletion.register_provider(
+    model_type="gpt-4-32k",
+    provider="custom",
+    completion_constructor=custom_completion
+)
+
+# Set the provider for the assistant
+assistant.llm_config["provider"] = "custom"
 
 user_proxy = autogen.UserProxyAgent(
     name="user_proxy",
