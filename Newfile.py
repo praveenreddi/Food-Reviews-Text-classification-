@@ -5,7 +5,7 @@ from typing import Dict, List, Any, Optional
 from langchain.llms.base import LLM
 from langchain.callbacks.manager import CallbackManagerForLLMRun
 
-# Install required packages if needed
+# Install required packages
 try:
     import autogen
 except ImportError:
@@ -85,63 +85,45 @@ def call_openai(messages, llm_url, access_token, model, temperature=0, max_token
     else:
         raise Exception(f"API call failed with status code {response.status_code}: {response.text}")
 
-# Create a custom endpoint class that will be used by AutoGen
-class CustomEndpoint:
-    def __init__(self):
-        self.llm = LlamaLLM(llm_model="openai")  # Using openai for gpt-4-32k
+# Create a custom completion function for AutoGen
+def custom_completion(messages, model=None, temperature=0, max_tokens=None, **kwargs):
+    """Custom completion function that uses your LlamaLLM"""
+    llm = LlamaLLM(llm_model="openai")  # Using openai for gpt-4-32k
 
-    def completion(self, messages, model=None, temperature=0, max_tokens=None, stream=False):
-        """Custom completion function that mimics OpenAI's API"""
-        if stream:
-            raise ValueError("Streaming is not supported with this custom endpoint")
+    # Format the messages for your API
+    prompt = ""
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        prompt += f"{role}: {content}\n"
 
-        # Extract the conversation context
-        prompt = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            prompt += f"{role}: {content}\n"
+    # Get response from your LLM
+    response_text = llm._call(prompt)
 
-        # Get response from your LLM
-        response_text = self.llm._call(prompt)
-
-        # Return in the format expected by AutoGen
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": response_text,
-                        "role": "assistant"
-                    }
+    # Return in the format expected by AutoGen
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": response_text,
+                    "role": "assistant"
                 }
-            ]
-        }
+            }
+        ]
+    }
 
-# Create a custom implementation of the OpenAI client
-class CustomOpenAI:
-    def __init__(self, api_key=None, base_url=None, **kwargs):
-        self.endpoint = CustomEndpoint()
+# Register the custom completion function with AutoGen
+autogen.ChatCompletion.register_completion(
+    custom_completion,
+    model_type="custom",
+    api_key="not-needed"
+)
 
-    def chat(self):
-        return self.endpoint
-
-# Monkey patch AutoGen to use our custom OpenAI client
-import importlib
-import sys
-
-# Create a module for our custom OpenAI client
-custom_openai_module = type(sys)(name='custom_openai')
-custom_openai_module.Client = CustomOpenAI
-sys.modules['custom_openai'] = custom_openai_module
-
-# Patch AutoGen to use our custom module
-autogen.oai.openai = custom_openai_module
-
-# Set up the agents
+# Create a config list with your custom model
 config_list = [
     {
-        "model": "gpt-4",
-        "api_key": "sk-dummy-key-for-custom-implementation"
+        "model": "custom",
+        "api_key": "not-needed"
     }
 ]
 
