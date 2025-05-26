@@ -1,5 +1,155 @@
 import asyncio
 import aiohttp
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_core.models import ChatCompletionClient
+
+class CustomLLMClient(ChatCompletionClient):
+    def __init__(self, base_url: str, access_token: str):
+        self.base_url = base_url
+        self.access_token = access_token
+
+    async def create(self, messages, model, **kwargs):
+        # Format messages for your LLM
+        prompt = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt += f"System: {content}\n"
+            elif role == "user":
+                prompt += f"User: {content}\n"
+        prompt += "Assistant:"
+
+        # Call your LLM
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        payload = {"prompt": prompt, "max_tokens": 500}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.base_url, headers=headers, json=payload) as response:
+                result = await response.json()
+                
+        # Return response in correct format
+        response_text = result.get("response", "No response")
+        return {
+            "choices": [{"message": {"role": "assistant", "content": response_text}}],
+            "model": model
+        }
+
+# Main code
+async def run_chat():
+    # Your LLM details
+    LLM_URL = "YOUR_LLM_ENDPOINT"
+    TOKEN = "YOUR_TOKEN"
+    
+    # Create agents
+    llm_client = CustomLLMClient(LLM_URL, TOKEN)
+    assistant = AssistantAgent("assistant", model_client=llm_client)
+    user = UserProxyAgent("user")
+    
+    # Start chat
+    result = await user.a_initiate_chat(
+        recipient=assistant,
+        message="Calculate factorial of 5",
+        max_turns=2
+    )
+    print("Done!")
+
+# For Databricks - use this:
+await run_chat()
+
+
+You're absolutely right! Let me give you a **simple, clean version** for Databricks:
+
+## Simple AutoGen 0.4 Code for Databricks
+
+```python
+import asyncio
+import aiohttp
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_core.models import ChatCompletionClient
+
+class CustomLLMClient(ChatCompletionClient):
+    def __init__(self, base_url: str, access_token: str):
+        self.base_url = base_url
+        self.access_token = access_token
+
+    async def create(self, messages, model, **kwargs):
+        # Format messages for your LLM
+        prompt = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt += f"System: {content}\n"
+            elif role == "user":
+                prompt += f"User: {content}\n"
+        prompt += "Assistant:"
+
+        # Call your LLM
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        payload = {"prompt": prompt, "max_tokens": 500}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.base_url, headers=headers, json=payload) as response:
+                result = await response.json()
+                
+        # Return response in correct format
+        response_text = result.get("response", "No response")
+        return {
+            "choices": [{"message": {"role": "assistant", "content": response_text}}],
+            "model": model
+        }
+
+# Main code
+async def run_chat():
+    # Your LLM details
+    LLM_URL = "YOUR_LLM_ENDPOINT"
+    TOKEN = "YOUR_TOKEN"
+    
+    # Create agents
+    llm_client = CustomLLMClient(LLM_URL, TOKEN)
+    assistant = AssistantAgent("assistant", model_client=llm_client)
+    user = UserProxyAgent("user")
+    
+    # Start chat
+    result = await user.a_initiate_chat(
+        recipient=assistant,
+        message="Calculate factorial of 5",
+        max_turns=2
+    )
+    print("Done!")
+
+# For Databricks - use this:
+await run_chat()
+```
+
+## What to Change:
+
+1. **Replace these two lines:**
+   ```python
+   LLM_URL = "https://your-actual-endpoint.com/generate"
+   TOKEN = "your_actual_access_token"
+   ```
+
+2. **Adjust the payload** based on your LLM's API:
+   ```python
+   payload = {"prompt": prompt, "max_tokens": 500}
+   # Change to whatever your LLM expects
+   ```
+
+3. **Adjust response parsing**:
+   ```python
+   response_text = result.get("response", "No response")
+   # Change "response" to whatever key your LLM uses
+   ```
+
+That's it! Much simpler and works in Databricks. Just update those 3 things with your actual LLM details.
+
+
+
+
+import asyncio
+import aiohttp
 from typing import List, Dict, Any
 
 # CORRECT IMPORTS FOR AUTOGEN 0.4
