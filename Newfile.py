@@ -1,5 +1,41 @@
 import asyncio
 import aiohttp
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_agentchat.teams import RoundRobinGroupChat
+
+# SIMPLE SOLUTION - Use OpenAI client with custom base_url
+async def run_chat():
+    # Create OpenAI-compatible client pointing to your endpoint
+    model_client = OpenAIChatCompletionClient(
+        model="custom-model",
+        base_url="https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt",
+        api_key="access_token",
+        model_info={
+            "vision": False,
+            "function_calling": False,
+            "json_output": False
+        }
+    )
+    
+    # Create agents
+    assistant = AssistantAgent("assistant", model_client=model_client)
+    user = UserProxyAgent("user")
+    
+    # Create team and run
+    team = RoundRobinGroupChat([user, assistant])
+    result = await team.run(task="Calculate factorial of 5")
+    
+    print("Done!")
+    print(result)
+
+# Run it
+await run_chat()
+
+
+
+import asyncio
+import aiohttp
 from typing import List, Dict, Any
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.teams import RoundRobinGroupChat
