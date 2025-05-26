@@ -1,5 +1,38 @@
 import asyncio
 import requests
+from autogen_agentchat.messages import TextMessage
+
+# SIMPLEST POSSIBLE SOLUTION - No inheritance, just a function
+async def call_your_llm(user_message: str):
+    # Your LLM details
+    LLM_URL = "https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt/question"
+    TOKEN = "access_token"
+    
+    # Call your LLM
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    payload = {"prompt": f"User: {user_message}\nAssistant:", "max_tokens": 500}
+    
+    try:
+        response = requests.post(LLM_URL, headers=headers, json=payload)
+        result = response.json()
+        return result.get("response", "No response")
+    except Exception as e:
+        return f"Error: {e}"
+
+# Test it
+async def run_simple():
+    user_input = "Calculate factorial of 5"
+    response = await call_your_llm(user_input)
+    print(f"User: {user_input}")
+    print(f"Assistant: {response}")
+
+# Run
+await run_simple()
+
+
+
+import asyncio
+import requests
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.base import Response
 from autogen_agentchat.messages import TextMessage
