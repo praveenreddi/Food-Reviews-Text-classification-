@@ -5,7 +5,7 @@ import json
 
 # Enhanced LlamaLLM with debugging
 class LlamaLLM:
-    def __init__(self, llm_model="openai"):
+    def __i, llm_model="openai"):
         self.llm_model = llm_model
         self.llm_url = "https://api.abacus.ai/api/v0/llm/completions"
         self.model = "gpt-4-32k" if llm_model == "openai" else "llama3-70b-instruct"
