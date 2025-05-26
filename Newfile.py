@@ -1,5 +1,225 @@
 import asyncio
 import aiohttp
+from typing import List, Dict, Any
+
+# CORRECT IMPORTS FOR AUTOGEN 0.4
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_core.models import ChatCompletionClient
+from autogen_core import CancellationToken
+
+class CustomLLMClient(ChatCompletionClient):
+    """
+    Custom LLM Client that integrates your LLM directly with AutoGen 0.4
+    """
+    def __init__(self, base_url: str, access_token: str, model_name: str = "custom-model"):
+        self.base_url = base_url
+        self.access_token = access_token
+        self.model_name = model_name
+
+    async def create(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """
+        Main method that AutoGen calls to get LLM responses
+        """
+        try:
+            print(f"🔄 Calling custom LLM with {len(messages)} messages...")
+            
+            # Format messages for your LLM
+            formatted_prompt = self._format_messages(messages)
+            print(f"📝 Formatted prompt: {formatted_prompt[:100]}...")
+
+            # Call your LLM API
+            response_content = await self._call_llm_async(formatted_prompt)
+            print(f"✅ LLM responded with: {response_content[:100]}...")
+
+            # Return in OpenAI-compatible format (required by AutoGen)
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": response_content
+                    },
+                    "finish_reason": "stop"
+                }],
+                "model": model,
+                "usage": {
+                    "prompt_tokens": len(formatted_prompt.split()),
+                    "completion_tokens": len(response_content.split()),
+                    "total_tokens": len(formatted_prompt.split()) + len(response_content.split())
+                }
+            }
+
+        except Exception as e:
+            print(f"❌ Error in LLM call: {e}")
+            # Return error response in correct format
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": f"I apologize, but I encountered an error: {str(e)}"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "model": model,
+                "usage": {"total_tokens": 0}
+            }
+
+    def _format_messages(self, messages: List[Dict[str, Any]]) -> str:
+        """
+        Convert AutoGen messages to your LLM's expected format
+        """
+        formatted_parts = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            if content and content.strip():
+                if role == "system":
+                    formatted_parts.append(f"System: {content}")
+                elif role == "user":
+                    formatted_parts.append(f"User: {content}")
+                elif role == "assistant":
+                    formatted_parts.append(f"Assistant: {content}")
+
+        # Create the full prompt
+        full_prompt = "\n".join(formatted_parts)
+        if full_prompt:
+            full_prompt += "\nAssistant:"
+        
+        return full_prompt
+
+    async def _call_llm_async(self, formatted_prompt: str) -> str:
+        """
+        Make the actual HTTP call to your LLM endpoint
+        """
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+
+        # Adjust this payload based on your LLM's API requirements
+        payload = {
+            "prompt": formatted_prompt,
+            "max_tokens": 1000,
+            "temperature": 0.7,
+            "stop": ["\nUser:", "\nSystem:"],  # Stop tokens to prevent infinite generation
+            # Add other parameters your LLM expects:
+            # "top_p": 0.9,
+            # "frequency_penalty": 0.0,
+            # "presence_penalty": 0.0,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.base_url, headers=headers, json=payload) as response:
+                response.raise_for_status()
+                result = await response.json()
+
+                # Parse response based on your LLM's format
+                # Adjust these based on how your LLM returns responses:
+                if "response" in result:
+                    return result["response"].strip()
+                elif "text" in result:
+                    return result["text"].strip()
+                elif "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0].get("text", "").strip()
+                elif "generated_text" in result:
+                    return result["generated_text"].strip()
+                else:
+                    return "No response generated from LLM."
+
+    @property
+    def capabilities(self) -> Dict[str, Any]:
+        """
+        Define what your LLM can do
+        """
+        return {
+            "chat_completion": True,
+            "function_calling": False,  # Set to True if your LLM supports function calling
+            "streaming": False,         # Set to True if your LLM supports streaming
+            "vision": False,           # Set to True if your LLM supports images
+        }
+
+async def main():
+    """
+    Main function demonstrating Approach 1: Direct Custom LLM Integration
+    """
+    
+    print("🚀 APPROACH 1: Direct Custom LLM Integration")
+    print("=" * 60)
+    
+    # REPLACE THESE WITH YOUR ACTUAL VALUES
+    LLM_ENDPOINT = "YOUR_LLM_ENDPOINT_URL"  # e.g., "https://api.your-llm.com/v1/generate"
+    ACCESS_TOKEN = "YOUR_ACCESS_TOKEN"       # Your actual access token
+    
+    # Validate configuration
+    if LLM_ENDPOINT == "YOUR_LLM_ENDPOINT_URL" or ACCESS_TOKEN == "YOUR_ACCESS_TOKEN":
+        print("❌ Please update LLM_ENDPOINT and ACCESS_TOKEN with your actual values!")
+        return
+
+    try:
+        # Step 1: Create your custom LLM client
+        print("📡 Creating custom LLM client...")
+        custom_llm = CustomLLMClient(
+            base_url=LLM_ENDPOINT,
+            access_token=ACCESS_TOKEN,
+            model_name="your-custom-model"
+        )
+
+        # Step 2: Create AssistantAgent with your custom LLM
+        print("🤖 Creating assistant agent...")
+        assistant = AssistantAgent(
+            name="math_assistant",
+            model_client=custom_llm,
+            system_message="You are a helpful AI assistant specialized in mathematics. "
+                          "Solve problems step by step and provide clear explanations."
+        )
+
+        # Step 3: Create UserProxyAgent (represents the user)
+        print("👤 Creating user proxy agent...")
+        user_proxy = UserProxyAgent(
+            name="user",
+            human_input_mode="NEVER"  # Won't ask for human input
+        )
+
+        # Step 4: Start the conversation
+        print("\n💬 Starting conversation...")
+        print("-" * 40)
+
+        # Create cancellation token for async control
+        cancellation_token = CancellationToken()
+
+        # Initiate chat between user and assistant
+        result = await user_proxy.a_initiate_chat(
+            recipient=assistant,
+            message="Help me solve this problem: calculate the factorial of 5 step by step.",
+            max_turns=3  # Limit conversation to 3 turns
+        )
+
+        print("\n" + "=" * 60)
+        print("✅ APPROACH 1 COMPLETED SUCCESSFULLY!")
+        print(f"📊 Conversation Summary:")
+        print(f"   - Total messages: {len(result.messages) if hasattr(result, 'messages') else 'N/A'}")
+        print(f"   - Final result: {result.summary if hasattr(result, 'summary') else 'Conversation completed'}")
+
+    except Exception as e:
+        print(f"\n❌ Error in Approach 1: {e}")
+        print("🔧 Please check your LLM endpoint and access token.")
+
+if __name__ == "__main__":
+    # Run the async main function
+    asyncio.run(main())
+
+
+
+
+
+import asyncio
+import aiohttp
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_core.components.models import LLMMessage, ChatCompletionContext
 from autogen_agentchat.models import ChatCompletionClient
