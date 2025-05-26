@@ -1,490 +1,56 @@
 import asyncio
-import aiohttp
-from autogen_ext.models.openai import OpenAIChatCompletionClient
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_agentchat.teams import RoundRobinGroupChat
+import requests
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.base import Response
+from autogen_agentchat.messages import TextMessage
 
-# SIMPLE SOLUTION - Use OpenAI client with custom base_url
-async def run_chat():
-    # Create OpenAI-compatible client pointing to your endpoint
-    model_client = OpenAIChatCompletionClient(
-        model="custom-model",
-        base_url="https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt",
-        api_key="access_token",
-        model_info={
-            "vision": False,
-            "function_calling": False,
-            "json_output": False
-        }
-    )
-    
-    # Create agents
-    assistant = AssistantAgent("assistant", model_client=model_client)
-    user = UserProxyAgent("user")
-    
-    # Create team and run
-    team = RoundRobinGroupChat([user, assistant])
-    result = await team.run(task="Calculate factorial of 5")
-    
-    print("Done!")
-    print(result)
-
-# Run it
-await run_chat()
-
-
-
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_agentchat.teams import RoundRobinGroupChat
-from autogen_core.models import ChatCompletionClient
-
-class CustomLLMClient(ChatCompletionClient):
-    def __init__(self, base_url: str, access_token: str):
-        self.base_url = base_url
+class SimpleLLMAgent(AssistantAgent):
+    def __init__(self, name: str, llm_url: str, access_token: str):
+        super().__init__(name)
+        self.llm_url = llm_url
         self.access_token = access_token
-
-    async def create(self, messages, model="custom-model", **kwargs):
-        # FIX: Handle different message types properly
-        prompt = ""
-        for msg in messages:
-            # Check if it's a dict or object
-            if hasattr(msg, 'content') and hasattr(msg, 'source'):
-                # It's a message object
-                content = msg.content
-                source = msg.source
-                if source == "system":
-                    prompt += f"System: {content}\n"
-                elif source == "user":
-                    prompt += f"User: {content}\n"
-            elif isinstance(msg, dict):
-                # It's a dictionary
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "system":
-                    prompt += f"System: {content}\n"
-                elif role == "user":
-                    prompt += f"User: {content}\n"
+    
+    async def on_messages(self, messages, cancellation_token):
+        # Get the last message
+        last_msg = messages[-1]
+        user_input = last_msg.content
         
-        prompt += "Assistant:"
-
-        # Call your LLM
+        # Call your LLM directly
         headers = {"Authorization": f"Bearer {self.access_token}"}
-        payload = {"prompt": prompt, "max_tokens": 500}
-
+        payload = {"prompt": f"User: {user_input}\nAssistant:", "max_tokens": 500}
+        
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.base_url, headers=headers, json=payload) as response:
-                    result = await response.json()
+            response = requests.post(self.llm_url, headers=headers, json=payload)
+            result = response.json()
+            llm_response = result.get("response", "No response")
         except:
-            result = {"response": "Error calling LLM"}
+            llm_response = "Error calling LLM"
+        
+        # Return response
+        return Response(chat_message=TextMessage(content=llm_response, source=self.name))
 
-        # Return response in correct format
-        response_text = result.get("response", "No response")
-        return {
-            "choices": [{"message": {"role": "assistant", "content": response_text}}],
-            "model": model
-        }
-
-    @property
-    def model_info(self):
-        return {
-            "vision": False,
-            "function_calling": False,
-            "json_output": False
-        }
-
-    @property
-    def capabilities(self):
-        return {"chat_completion": True}
-
-    def actual_usage(self):
-        return {}
-
-    def remaining_tokens(self):
-        return 1000
-
-    def total_usage(self):
-        return {}
-
-    def count_tokens(self, messages):
-        return 100
-
-    def create_stream(self, messages, model="custom-model", **kwargs):
-        pass
-
-    def close(self):
-        pass
-
-# Main code
-async def run_chat():
-    # Your LLM details
+# Use it
+async def run_simple():
+    # Your details
     LLM_URL = "https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt/question"
     TOKEN = "access_token"
-
-    # Create agents
-    llm_client = CustomLLMClient(LLM_URL, TOKEN)
-    assistant = AssistantAgent("assistant", model_client=llm_client)
-    user = UserProxyAgent("user")
-
-    # Create team and run
-    team = RoundRobinGroupChat([user, assistant])
-    result = await team.run(task="Calculate factorial of 5")
-
-    print("Done!")
-    print(result)
-
-# Run in Databricks:
-await run_chat()
-
-
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_agentchat.teams import RoundRobinGroupChat
-from autogen_core.models import ChatCompletionClient
-
-class CustomLLMClient(ChatCompletionClient):
-    def __init__(self, base_url: str, access_token: str):
-        self.base_url = base_url
-        self.access_token = access_token
-
-    # FIX: Add model parameter with default value
-    async def create(self, messages, model="custom-model", **kwargs):
-        # Format messages for your LLM
-        prompt = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system":
-                prompt += f"System: {content}\n"
-            elif role == "user":
-                prompt += f"User: {content}\n"
-        prompt += "Assistant:"
-
-        # Call your LLM
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        payload = {"prompt": prompt, "max_tokens": 500}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.base_url, headers=headers, json=payload) as response:
-                    result = await response.json()
-        except:
-            result = {"response": "Error calling LLM"}
-
-        # Return response in correct format
-        response_text = result.get("response", "No response")
-        return {
-            "choices": [{"message": {"role": "assistant", "content": response_text}}],
-            "model": model
-        }
-
-    @property
-    def model_info(self):
-        return {
-            "vision": False,
-            "function_calling": False,
-            "json_output": False
-        }
-
-    @property
-    def capabilities(self):
-        return {"chat_completion": True}
-
-    def actual_usage(self):
-        return {}
-
-    def remaining_tokens(self):
-        return 1000
-
-    def total_usage(self):
-        return {}
-
-    def count_tokens(self, messages):
-        return 100
-
-    def create_stream(self, messages, model="custom-model", **kwargs):
-        pass
-
-    def close(self):
-        pass
-
-# Main code
-async def run_chat():
-    # Your LLM details
-    LLM_URL = "https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt/question"
-    TOKEN = "access_token"
-
-    # Create agents
-    llm_client = CustomLLMClient(LLM_URL, TOKEN)
-    assistant = AssistantAgent("assistant", model_client=llm_client)
-    user = UserProxyAgent("user")
-
-    # Create team and run
-    team = RoundRobinGroupChat([user, assistant])
-    result = await team.run(task="Calculate factorial of 5")
-
-    print("Done!")
-    print(result)
-
-# Run in Databricks:
-await run_chat()
-
-
-
-
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_core.models import ChatCompletionClient
-
-class CustomLLMClient(ChatCompletionClient):
-    def __init__(self, base_url: str, access_token: str):
-        self.base_url = base_url
-        self.access_token = access_token
-
-    async def create(self, messages, model, **kwargs):
-        # Format messages for your LLM
-        prompt = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system":
-                prompt += f"System: {content}\n"
-            elif role == "user":
-                prompt += f"User: {content}\n"
-        prompt += "Assistant:"
-
-        # Call your LLM
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        payload = {"prompt": prompt, "max_tokens": 500}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.base_url, headers=headers, json=payload) as response:
-                result = await response.json()
-
-        # Return response in correct format
-        response_text = result.get("response", "No response")
-        return {
-            "choices": [{"message": {"role": "assistant", "content": response_text}}],
-            "model": model
-        }
-
-    @property
-    def model_info(self):
-        return {
-            "vision": False,
-            "function_calling": False,
-            "json_output": False
-        }
-
-    @property
-    def capabilities(self):
-        return {"chat_completion": True}
-
-    def actual_usage(self):
-        return {}
-
-    def remaining_tokens(self):
-        return 1000
-
-    def total_usage(self):
-        return {}
-
-    def count_tokens(self, messages):
-        return 100
-
-    def create_stream(self, messages, model, **kwargs):
-        pass
-
-    def close(self):
-        pass
-
-# Main code
-async def run_chat():
-    # REPLACE WITH YOUR ACTUAL VALUES:
-    LLM_URL = "https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt/question"
-    TOKEN = "access_token"
-
-    # Create agents
-    llm_client = CustomLLMClient(LLM_URL, TOKEN)
-    assistant = AssistantAgent("assistant", model_client=llm_client)
-    user = UserProxyAgent("user")
-
-    # CORRECT METHOD - Use RoundRobinGroupChat:
-    from autogen_agentchat.teams import RoundRobinGroupChat
     
-    team = RoundRobinGroupChat([user, assistant])
-    result = await team.run(task="Calculate factorial of 5")
+    # Create agent
+    agent = SimpleLLMAgent("assistant", LLM_URL, TOKEN)
     
-    print("Done!")
-    print(result)
+    # Test it
+    test_message = TextMessage(content="Calculate factorial of 5", source="user")
+    response = await agent.on_messages([test_message], None)
+    
+    print(f"Response: {response.chat_message.content}")
 
-# Run in Databricks:
-await run_chat()
-
-
-
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_core.models import ChatCompletionClient
-
-class CustomLLMClient(ChatCompletionClient):
-    def __init__(self, base_url: str, access_token: str):
-        self.base_url = base_url
-        self.access_token = access_token
-
-    async def create(self, messages, model, **kwargs):
-        # Format messages for your LLM
-        prompt = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system":
-                prompt += f"System: {content}\n"
-            elif role == "user":
-                prompt += f"User: {content}\n"
-        prompt += "Assistant:"
-
-        # Call your LLM
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        payload = {"prompt": prompt, "max_tokens": 500}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.base_url, headers=headers, json=payload) as response:
-                result = await response.json()
-
-        # Return response in correct format
-        response_text = result.get("response", "No response")
-        return {
-            "choices": [{"message": {"role": "assistant", "content": response_text}}],
-            "model": model
-        }
-
-    # THIS IS THE MISSING PROPERTY CAUSING THE ERROR:
-    @property
-    def model_info(self):
-        return {
-            "vision": False,
-            "function_calling": False,
-            "json_output": False
-        }
-
-    @property
-    def capabilities(self):
-        return {"chat_completion": True}
-
-    def actual_usage(self):
-        return {}
-
-    def remaining_tokens(self):
-        return 1000
-
-    def total_usage(self):
-        return {}
-
-    def count_tokens(self, messages):
-        return 100
-
-    def create_stream(self, messages, model, **kwargs):
-        pass
-
-    def close(self):
-        pass
-
-# Main code
-async def run_chat():
-    # REPLACE WITH YOUR ACTUAL VALUES:
-    LLM_URL = "https://askattapis-orchestration-stage.dev.att.com/api/v1/askatt/question"
-    TOKEN = "access_token"
-
-    # Create agents
-    llm_client = CustomLLMClient(LLM_URL, TOKEN)
-    assistant = AssistantAgent("assistant", model_client=llm_client)
-    user = UserProxyAgent("user")
-
-    # Start chat
-    result = await user.a_initiate_chat(
-        recipient=assistant,
-        message="Calculate factorial of 5",
-        max_turns=2
-    )
-    print("Done!")
-
-# Run in Databricks:
-await run_chat()
+# Run
+await run_simple()
 
 
 
 
-
-
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
-from autogen_core.models import ChatCompletionClient
-
-class CustomLLMClient(ChatCompletionClient):
-    def __init__(self, base_url: str, access_token: str):
-        self.base_url = base_url
-        self.access_token = access_token
-
-    async def create(self, messages, model, **kwargs):
-        # Format messages for your LLM
-        prompt = ""
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role == "system":
-                prompt += f"System: {content}\n"
-            elif role == "user":
-                prompt += f"User: {content}\n"
-        prompt += "Assistant:"
-
-        # Call your LLM
-        headers = {"Authorization": f"Bearer {self.access_token}"}
-        payload = {"prompt": prompt, "max_tokens": 500}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.base_url, headers=headers, json=payload) as response:
-                result = await response.json()
-
-        # Return response in correct format
-        response_text = result.get("response", "No response")
-        return {
-            "choices": [{"message": {"role": "assistant", "content": response_text}}],
-            "model": model
-        }
-
-    # ADD THESE MISSING METHODS:
-    @property
-    def capabilities(self):
-        return {"chat_completion": True}
-
-    def actual_usage(self):
-        return {}
-
-    def remaining_tokens(self):
-        return 1000
-
-    def total_usage(self):
-        return {}
-
-    def count_tokens(self, messages):
-        return 100
-
-    def create_stream(self, messages, model, **kwargs):
-        pass
-
-    def close(self):
+def close(self):
         pass
 
 # Main code
@@ -603,6 +169,7 @@ class CustomLLMClient(ChatCompletionClient):
         headers = {"Authorization": f"Bearer {self.access_token}"}
         payload = {"prompt": prompt, "max_tokens": 500}
         
+    
         async with aiohttp.ClientSession() as session:
             async with session.post(self.base_url, headers=headers, json=payload) as response:
                 result = await response.json()
