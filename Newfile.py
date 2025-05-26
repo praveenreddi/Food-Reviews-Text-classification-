@@ -1,5 +1,91 @@
 import asyncio
 import aiohttp
+from typing import List, Dict, Any
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_core.models import ChatCompletionClient
+
+class CustomLLMClient(ChatCompletionClient):
+    def __init__(self, base_url: str, access_token: str):
+        self.base_url = base_url
+        self.access_token = access_token
+
+    async def create(self, messages, model, **kwargs):
+        # Format messages for your LLM
+        prompt = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt += f"System: {content}\n"
+            elif role == "user":
+                prompt += f"User: {content}\n"
+        prompt += "Assistant:"
+
+        # Call your LLM
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        payload = {"prompt": prompt, "max_tokens": 500}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.base_url, headers=headers, json=payload) as response:
+                result = await response.json()
+
+        # Return response in correct format
+        response_text = result.get("response", "No response")
+        return {
+            "choices": [{"message": {"role": "assistant", "content": response_text}}],
+            "model": model
+        }
+
+    # ADD THESE MISSING METHODS:
+    @property
+    def capabilities(self):
+        return {"chat_completion": True}
+
+    def actual_usage(self):
+        return {}
+
+    def remaining_tokens(self):
+        return 1000
+
+    def total_usage(self):
+        return {}
+
+    def count_tokens(self, messages):
+        return 100
+
+    def create_stream(self, messages, model, **kwargs):
+        pass
+
+    def close(self):
+        pass
+
+# Main code
+async def run_chat():
+    # REPLACE WITH YOUR ACTUAL VALUES:
+    LLM_URL = "YOUR_LLM_ENDPOINT"  
+    TOKEN = "YOUR_TOKEN"
+
+    # Create agents
+    llm_client = CustomLLMClient(LLM_URL, TOKEN)
+    assistant = AssistantAgent("assistant", model_client=llm_client)
+    user = UserProxyAgent("user")
+
+    # Start chat
+    result = await user.a_initiate_chat(
+        recipient=assistant,
+        message="Calculate factorial of 5",
+        max_turns=2
+    )
+    print("Done!")
+
+# Run in Databricks:
+await run_chat()
+
+
+
+
+import asyncio
+import aiohttp
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_core.models import ChatCompletionClient
 
